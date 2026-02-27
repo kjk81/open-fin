@@ -17,12 +17,14 @@ import {
   fetchWatchlist,
   addToWatchlist,
   removeFromWatchlist,
+  fetchWorkerStatus,
 } from "../api";
 
 // ── State ────────────────────────────────────────────────────────────────────
 
 interface AppState {
   backendStatus: BackendStatus;
+  workerOnline: boolean;
   portfolio: PortfolioPosition[];
   watchlist: WatchlistItem[];
   activeTicker: TickerInfo | null;
@@ -37,6 +39,7 @@ interface AppState {
 
 const initialState: AppState = {
   backendStatus: "connecting",
+  workerOnline: false,
   portfolio: [],
   watchlist: [],
   activeTicker: null,
@@ -53,6 +56,7 @@ const initialState: AppState = {
 
 type Action =
   | { type: "SET_BACKEND_STATUS"; status: BackendStatus }
+  | { type: "SET_WORKER_ONLINE"; online: boolean }
   | { type: "SET_PORTFOLIO"; positions: PortfolioPosition[] }
   | { type: "SET_WATCHLIST"; items: WatchlistItem[] }
   | { type: "SET_ACTIVE_TICKER"; ticker: TickerInfo | null }
@@ -70,6 +74,8 @@ function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "SET_BACKEND_STATUS":
       return { ...state, backendStatus: action.status };
+    case "SET_WORKER_ONLINE":
+      return { ...state, workerOnline: action.online };
     case "SET_PORTFOLIO":
       return { ...state, portfolio: action.positions };
     case "SET_WATCHLIST":
@@ -162,6 +168,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
     reloadPortfolio();
     reloadWatchlist();
   }, [state.backendStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (state.backendStatus !== "running") {
+      dispatch({ type: "SET_WORKER_ONLINE", online: false });
+      return;
+    }
+
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const status = await fetchWorkerStatus();
+        if (!cancelled) {
+          dispatch({ type: "SET_WORKER_ONLINE", online: status.online });
+        }
+      } catch {
+        if (!cancelled) {
+          dispatch({ type: "SET_WORKER_ONLINE", online: false });
+        }
+      }
+    };
+
+    check();
+    const interval = setInterval(check, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [state.backendStatus]);
 
   const reloadPortfolio = useCallback(async () => {
     try {

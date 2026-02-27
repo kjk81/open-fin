@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import heapq
 from typing import Any
 from typing import Literal
 
@@ -131,20 +132,34 @@ def graph_nodes(
     """Paginated node list for the Table View."""
     G = load_graph()
     degrees = _degree_map(G)
+    search_upper = search.upper() if search else None
+    window_size = offset + limit
 
-    rows = []
+    total = 0
+    if window_size <= 0:
+        return {"total": 0, "items": []}
+
+    top_rows: list[tuple[int, str, dict[str, Any]]] = []
+
     for n, attrs in G.nodes(data=True):
         if kind and attrs.get("kind") != kind:
             continue
-        if search and search.upper() not in n.upper():
+        if search_upper and search_upper not in n.upper():
             continue
-        rows.append({"id": n, **attrs, "degree": degrees.get(n, 0)})
+        total += 1
+        row = {"id": n, **attrs, "degree": degrees.get(n, 0)}
+        entry = (int(row["degree"]), str(row["id"]), row)
+        if len(top_rows) < window_size:
+            heapq.heappush(top_rows, entry)
+        else:
+            heapq.heappushpop(top_rows, entry)
 
-    rows.sort(key=lambda x: -x["degree"])
+    ranked = sorted(top_rows, key=lambda x: (x[0], x[1]), reverse=True)
+    page_items = [row for _, _, row in ranked[offset:offset + limit]]
 
     return {
-        "total": len(rows),
-        "items": rows[offset : offset + limit],
+        "total": total,
+        "items": page_items,
     }
 
 
@@ -157,16 +172,22 @@ def graph_edges(
 ) -> dict[str, Any]:
     """Paginated edge list for the Table View."""
     G = load_graph()
+    source_upper = source.upper() if source else None
+    start = offset
+    stop = offset + limit
 
-    rows = []
+    total = 0
+    items: list[dict[str, Any]] = []
     for u, v, data in G.edges(data=True):
         if kind and data.get("kind") != kind:
             continue
-        if source and u.upper() != source.upper():
+        if source_upper and u.upper() != source_upper:
             continue
-        rows.append({"source": u, "target": v, **data})
+        if start <= total < stop:
+            items.append({"source": u, "target": v, **data})
+        total += 1
 
     return {
-        "total": len(rows),
-        "items": rows[offset : offset + limit],
+        "total": total,
+        "items": items,
     }

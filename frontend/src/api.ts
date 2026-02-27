@@ -12,6 +12,12 @@ import type {
   PaginatedEdges,
   NodeQueryParams,
   EdgeQueryParams,
+  Loadout,
+  LoadoutCreate,
+  LoadoutUpdate,
+  PaginatedExecutions,
+  WorkerStatusInfo,
+  StrategyInfo,
 } from "./types";
 
 const API = "http://localhost:8000";
@@ -141,6 +147,66 @@ export async function fetchGraphEdges(params: EdgeQueryParams = {}): Promise<Pag
   if (params.limit != null) qs.set("limit", String(params.limit));
   const res = await fetch(`${API}/api/graph/edges?${qs}`);
   if (!res.ok) throw new Error(`Graph edges fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchLoadouts(): Promise<Loadout[]> {
+  const res = await fetch(`${API}/api/loadouts`);
+  if (!res.ok) throw new Error(`Loadouts fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function createLoadout(payload: LoadoutCreate): Promise<Loadout> {
+  const res = await fetch(`${API}/api/loadouts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `Create loadout failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateLoadout(id: number, payload: LoadoutUpdate): Promise<Loadout> {
+  const res = await fetch(`${API}/api/loadouts/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `Update loadout failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteLoadout(id: number): Promise<void> {
+  const res = await fetch(`${API}/api/loadouts/${id}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) throw new Error(`Delete loadout failed: ${res.status}`);
+}
+
+export async function fetchExecutions(
+  loadoutId: number,
+  offset = 0,
+  limit = 25,
+): Promise<PaginatedExecutions> {
+  const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  const res = await fetch(`${API}/api/loadouts/${loadoutId}/executions?${qs}`);
+  if (!res.ok) throw new Error(`Executions fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchWorkerStatus(): Promise<WorkerStatusInfo> {
+  const res = await fetch(`${API}/api/worker/status`);
+  if (!res.ok) throw new Error(`Worker status fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchStrategies(): Promise<StrategyInfo[]> {
+  const res = await fetch(`${API}/api/strategies`);
+  if (!res.ok) throw new Error(`Strategies fetch failed: ${res.status}`);
   return res.json();
 }
 

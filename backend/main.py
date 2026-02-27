@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from database import engine, SessionLocal
 from models import Base
 from routers.portfolio import sync_alpaca_portfolio
-from routers import portfolio, ticker, chat, trade, llm, watchlist, graph
+from routers import portfolio, ticker, chat, trade, llm, watchlist, graph, loadouts
 from agent.llm import ensure_default_settings
 
 logging.basicConfig(
@@ -63,6 +63,7 @@ app.include_router(trade.router, prefix="/api")
 app.include_router(llm.router, prefix="/api")
 app.include_router(watchlist.router, prefix="/api")
 app.include_router(graph.router, prefix="/api")
+app.include_router(loadouts.router, prefix="/api")
 
 
 @app.get("/api/health")

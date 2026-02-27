@@ -131,3 +131,67 @@ export interface EdgeQueryParams {
   offset?: number;
   limit?: number;
 }
+
+export interface Loadout {
+  id: number;
+  ticker: string;
+  strategy_name: string;
+  schedule: string;
+  is_active: boolean;
+  parameters: Record<string, unknown>;
+  max_qty: number;
+  dry_run: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LoadoutCreate {
+  ticker: string;
+  strategy_name: string;
+  schedule: string;
+  parameters?: Record<string, unknown>;
+  max_qty?: number;
+  dry_run?: boolean;
+}
+
+export interface LoadoutUpdate {
+  ticker?: string;
+  strategy_name?: string;
+  schedule?: string;
+  is_active?: boolean;
+  parameters?: Record<string, unknown>;
+  max_qty?: number;
+  dry_run?: boolean;
+}
+
+export interface LoadoutExecution {
+  id: number;
+  loadout_id: number;
+  timestamp: string;
+  action: "BUY" | "SELL" | "HOLD";
+  ticker: string;
+  quantity: number;
+  confidence: number;
+  status: "pending" | "filled" | "failed" | "dry_run" | string;
+  dry_run: boolean;
+  error_trace: string | null;
+  order_id: string | null;
+}
+
+export interface PaginatedExecutions {
+  total: number;
+  items: LoadoutExecution[];
+}
+
+export interface WorkerStatusInfo {
+  online: boolean;
+  status: string;
+  stale: boolean;
+  last_heartbeat: string | null;
+  worker_id: string | null;
+  pid?: number;
+}
+
+export interface StrategyInfo {
+  name: string;
+}

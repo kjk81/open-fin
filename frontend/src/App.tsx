@@ -7,6 +7,8 @@ import { ChatBox } from "./components/ChatBox";
 import { TickerDashboard } from "./components/TickerDashboard";
 import { LlmSettingsPanel } from "./components/LlmSettingsPanel";
 import { KnowledgeGraphExplorer } from "./components/kg/KnowledgeGraphExplorer";
+import { WorkerStatusBadge } from "./components/WorkerStatusBadge";
+import { LoadoutsPanel } from "./components/LoadoutsPanel";
 
 export default function App() {
   return (
@@ -16,11 +18,11 @@ export default function App() {
   );
 }
 
-type Tab = "copilot" | "kg";
+type Tab = "copilot" | "kg" | "loadouts";
 
 function Layout() {
   const { state } = useAppContext();
-  const { backendStatus } = state;
+  const { backendStatus, workerOnline } = state;
   const [activeTab, setActiveTab] = useState<Tab>("copilot");
 
   return (
@@ -43,8 +45,15 @@ function Layout() {
           >
             Knowledge Graph
           </button>
+          <button
+            className={`tab${activeTab === "loadouts" ? " active" : ""}`}
+            onClick={() => setActiveTab("loadouts")}
+          >
+            Loadouts
+          </button>
         </nav>
         <LlmSettingsPanel />
+        <WorkerStatusBadge online={workerOnline} />
         <StatusBadge status={backendStatus} />
       </header>
 
@@ -79,8 +88,10 @@ function Layout() {
           <ChatBox />
           <TickerDashboard />
         </>
-      ) : (
+      ) : activeTab === "kg" ? (
         <KnowledgeGraphExplorer />
+      ) : (
+        <LoadoutsPanel />
       )}
     </div>
   );

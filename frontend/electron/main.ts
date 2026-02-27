@@ -45,6 +45,7 @@ function venvBinaries(venvDir: string) {
 }
 
 let backendProcess: ChildProcess | null = null;
+let workerProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
 
 function sha256File(filePath: string): string {
@@ -130,10 +131,56 @@ function startBackend(): void {
   });
 }
 
+function startWorker(): void {
+  if (workerProcess) return;
+
+  const { BACKEND_DIR, VENV_DIR, DB_PATH, KG_PATH, ENV_PATH } = runtimePaths();
+  const { python } = venvBinaries(VENV_DIR);
+
+  console.log("[Electron] Starting worker...");
+  workerProcess = spawn(
+    python,
+    ["worker.py"],
+    {
+      cwd: BACKEND_DIR,
+      stdio: "pipe",
+      env: {
+        ...process.env,
+        OPEN_FIN_DB_PATH: DB_PATH,
+        OPEN_FIN_KG_PATH: KG_PATH,
+        OPEN_FIN_ENV_PATH: ENV_PATH,
+      },
+    },
+  );
+
+  workerProcess.stdout?.on("data", (data: Buffer) => {
+    process.stdout.write(`[worker] ${data}`);
+  });
+  workerProcess.stderr?.on("data", (data: Buffer) => {
+    process.stderr.write(`[worker] ${data}`);
+  });
+
+  workerProcess.on("exit", (code) => {
+    console.log(`[Electron] Worker exited with code ${code}`);
+    workerProcess = null;
+  });
+
+  workerProcess.on("error", (err) => {
+    console.error("[Electron] Worker process error:", err);
+  });
+}
+
 function stopBackend(): void {
   if (backendProcess) {
     backendProcess.kill();
     backendProcess = null;
+  }
+}
+
+function stopWorker(): void {
+  if (workerProcess) {
+    workerProcess.kill();
+    workerProcess = null;
   }
 }
 
@@ -171,6 +218,10 @@ ipcMain.handle("get-backend-status", () => ({
   running: backendProcess !== null && !backendProcess.killed,
 }));
 
+ipcMain.handle("get-worker-status", () => ({
+  running: workerProcess !== null && !workerProcess.killed,
+}));
+
 ipcMain.handle("stop-backend", () => {
   stopBackend();
   return { stopped: true };
@@ -179,6 +230,7 @@ ipcMain.handle("stop-backend", () => {
 // App lifecycle
 app.whenReady().then(() => {
   startBackend();
+  setTimeout(() => startWorker(), 5000);
   createWindow();
 
   app.on("activate", () => {
@@ -187,6 +239,7 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  stopWorker();
   stopBackend();
   if (process.platform !== "darwin") app.quit();
 });
