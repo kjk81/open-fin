@@ -1,0 +1,43 @@
+{
+  "name": "open-fin-frontend",
+  "version": "0.1.0",
+  "description": "Open-Fin Desktop Financial AI Co-pilot",
+  "main": "dist/electron/main.js",
+  "scripts": {
+    "dev:vite": "vite --port 5173",
+    "dev:electron": "tsc -p tsconfig.node.json && electron .",
+    "dev": "concurrently -k -p \"[{name}]\" -n \"VITE,ELECTRON\" -c \"cyan,yellow\" \"npm run dev:vite\" \"wait-on http://localhost:5173 && npm run dev:electron\"",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.node.json",
+    "build": "npm run build:renderer && npm run build:electron && electron-builder",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.9",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.open-fin.app",
+    "productName": "Open-Fin",
+    "directories": {
+      "output": "dist/package"
+    },
+    "files": [
+      "dist/renderer/**/*",
+      "dist/electron/**/*"
+    ]
+  }
+}

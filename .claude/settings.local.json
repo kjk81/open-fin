@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(pip --version)",
+      "Bash(pip3 --version)",
+      "Bash(git --version)",
+      "Bash(curl -s http://localhost:8001/api/ticker/AAPL)",
+      "Bash(python -m json.tool)",
+      "Bash(curl -s http://localhost:8001/api/portfolio)",
+      "Bash(pkill -f \"uvicorn main:app --port 8001\")",
+      "Bash(npx tsc -p tsconfig.node.json)",
+      "Bash(npx tsc -p tsconfig.json --noEmit)",
+      "Bash(npx tsc --noEmit)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\kjk\\.claude\\projects\\c--Users-kjk-antiod-web-open-fin\\memory"
+    ]
+  }
+}
