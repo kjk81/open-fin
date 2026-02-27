@@ -86,5 +86,9 @@ cd frontend
 npm run typecheck
 ```
 
+## Next Steps
+Additional API support (brokers)
+Preset Loadouts (e.g. TradingAgents, AlphaQuanter, standard algos - and ensure compatability)
+
 ## 🤝 Contributing
 Contributions are welcome! Please check out the [Frontend Style Guide](frontend/README.md) for UI/UX guidelines.
