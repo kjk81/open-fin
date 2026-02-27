@@ -1,15 +1,19 @@
 import logging
+import os
 from contextlib import asynccontextmanager
+
 from dotenv import load_dotenv
 
-load_dotenv()  # Load .env before anything else
+# Load .env before anything else. In packaged builds, Electron can point
+# OPEN_FIN_ENV_PATH at a user-writable location.
+load_dotenv(dotenv_path=os.getenv("OPEN_FIN_ENV_PATH"), override=False)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import engine, SessionLocal
 from models import Base
 from routers.portfolio import sync_alpaca_portfolio
-from routers import portfolio, ticker, chat, trade, llm
+from routers import portfolio, ticker, chat, trade, llm, watchlist, graph
 from agent.llm import ensure_default_settings
 
 logging.basicConfig(
@@ -57,6 +61,8 @@ app.include_router(ticker.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(trade.router, prefix="/api")
 app.include_router(llm.router, prefix="/api")
+app.include_router(watchlist.router, prefix="/api")
+app.include_router(graph.router, prefix="/api")
 
 
 @app.get("/api/health")

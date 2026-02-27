@@ -1,9 +1,10 @@
+import { useState } from "react";
 import { useAppContext } from "../context/AppContext";
 import { Spinner } from "./Spinner";
 import { TickerCard } from "./TickerCard";
 
 export function TickerDashboard() {
-  const { state } = useAppContext();
+  const { state, toggleWatchlist } = useAppContext();
   const {
     activeTicker,
     activeTickerLoading,
@@ -11,11 +12,38 @@ export function TickerDashboard() {
     selectedSymbol,
     tickerReport,
     tickerReportLoading,
+    watchlist,
   } = state;
+  const [starring, setStarring] = useState(false);
+
+  const isWatched = selectedSymbol != null && watchlist.some((w) => w.ticker === selectedSymbol);
+
+  const handleStar = async () => {
+    if (!selectedSymbol || starring) return;
+    setStarring(true);
+    try {
+      await toggleWatchlist(selectedSymbol);
+    } finally {
+      setStarring(false);
+    }
+  };
 
   return (
     <aside className="pane-dashboard">
-      <h2 className="pane-title" style={{ marginBottom: "16px" }}>Ticker</h2>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
+        <h2 className="pane-title">Ticker</h2>
+        {selectedSymbol && (
+          <button
+            className="btn-ghost"
+            onClick={handleStar}
+            disabled={starring}
+            title={isWatched ? "Remove from Watchlist" : "Add to Watchlist"}
+            style={{ fontSize: "18px", lineHeight: 1, padding: "2px 6px", color: isWatched ? "var(--accent)" : "var(--text-muted)" }}
+          >
+            {starring ? <Spinner size={14} /> : isWatched ? "★" : "☆"}
+          </button>
+        )}
+      </div>
 
       {/* Empty state */}
       {!selectedSymbol && !activeTickerLoading && (

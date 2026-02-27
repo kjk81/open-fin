@@ -75,6 +75,15 @@ async def intent_router(state: ChatState) -> dict:
             seen.add(t)
             tickers.append(t)
 
+    # --- Explicit ticker refs (e.g. coming from @AAPL mentions in the UI) ---
+    for ref in state.get("context_refs", []):
+        if not ref or ref == "user_portfolio":
+            continue
+        sym = str(ref).upper().strip()
+        if 1 <= len(sym) <= 10 and sym not in seen:
+            seen.add(sym)
+            tickers.append(sym)
+
     # --- Context refs (merge with any already supplied by the API caller) ---
     context_refs: list[str] = list(state.get("context_refs", []))
     if any(kw in lower for kw in _PORTFOLIO_KEYWORDS):
@@ -185,6 +194,14 @@ async def ticker_lookup_node(state: ChatState) -> dict:
             except Exception as exc:
                 logger.warning("LLM synthesis error for %s: %s", symbol, exc)
                 report_text = fundamentals  # Fallback: raw data
+
+            # --- Update local Knowledge Graph (best-effort) ---
+            try:
+                from .knowledge_graph import upsert_ticker_snapshot
+
+                upsert_ticker_snapshot(symbol=symbol, info=info, report_text=report_text)
+            except Exception as exc:
+                logger.debug("KG update failed for %s: %s", symbol, exc)
 
             # --- Upsert ReportCache ---
             try:

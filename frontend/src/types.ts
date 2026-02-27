@@ -60,8 +60,74 @@ export type LlmProvider =
   | "huggingface"
   | "ollama";
 
+export interface WatchlistItem {
+  id: number;
+  ticker: string;
+  added_at: string;
+}
+
 export interface LlmSettings {
   mode: "cloud" | "ollama";
   providers: LlmProvider[];
   fallback_order: LlmProvider[];
+}
+
+// ── Knowledge Graph ─────────────────────────────────────────────────────────
+
+export type NodeKind = "ticker" | "sector" | "industry";
+export type EdgeKind = "IN_SECTOR" | "IN_INDUSTRY" | "CO_MENTION";
+
+export interface GraphNode {
+  id: string;
+  kind: NodeKind;
+  degree: number;
+  updated_at?: string;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  kind: EdgeKind;
+}
+
+export interface SubgraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface Community {
+  id: number;
+  size: number;
+  representative: string;
+  members: string[];
+}
+
+export interface GraphSummary {
+  node_count: number;
+  edge_count: number;
+  communities: Community[];
+}
+
+export interface PaginatedNodes {
+  total: number;
+  items: GraphNode[];
+}
+
+export interface PaginatedEdges {
+  total: number;
+  items: GraphEdge[];
+}
+
+export interface NodeQueryParams {
+  kind?: NodeKind;
+  search?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export interface EdgeQueryParams {
+  kind?: EdgeKind;
+  source?: string;
+  offset?: number;
+  limit?: number;
 }

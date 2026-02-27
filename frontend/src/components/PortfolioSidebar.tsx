@@ -6,7 +6,7 @@ import { Spinner } from "./Spinner";
 
 export function PortfolioSidebar() {
   const { state, selectTicker, reloadPortfolio } = useAppContext();
-  const { portfolio, selectedSymbol } = state;
+  const { portfolio, selectedSymbol, watchlist } = state;
   const [syncing, setSyncing] = useState(false);
 
   const totalValue = portfolio.reduce((s, p) => s + p.market_value, 0);
@@ -90,6 +90,34 @@ export function PortfolioSidebar() {
           </div>
         </div>
       )}
+      {/* Watchlist section */}
+      <div style={{ marginTop: "24px" }}>
+        <h2 className="pane-title" style={{ marginBottom: "12px" }}>Watchlist</h2>
+        {watchlist.length === 0 ? (
+          <p style={{ color: "var(--text-muted)", fontSize: "12px", lineHeight: 1.6 }}>
+            Star a ticker in the dashboard to add it here.
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+            {watchlist.map((w) => {
+              const selected = selectedSymbol === w.ticker;
+              return (
+                <button
+                  key={w.ticker}
+                  className={`position-row${selected ? " position-row--selected" : ""}`}
+                  onClick={() => selectTicker(w.ticker)}
+                  style={{ padding: "8px 10px" }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ color: "var(--accent)", fontSize: "14px" }}>★</span>
+                    <span style={{ fontWeight: 700, fontSize: "14px" }}>{w.ticker}</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </aside>
   );
 }

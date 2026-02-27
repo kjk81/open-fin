@@ -21,3 +21,17 @@ A local, privacy-first desktop application functioning as a quantitative financi
 
 
 * **Trade Execution (HITL):** The agent outputs proposed trades as strictly formatted JSON. The UI renders this as a clickable "Review Trade" button, which populates a standalone Trade Ticket pane for the user to manually execute via Alpaca.
+
+### 4. Production / Rollout Notes
+
+* **Packaged app resources:** The Electron build copies the Python backend into the app's `resources/backend` directory.
+* **Writable storage:** In packaged builds, the SQLite DB and Knowledge Graph are stored under the OS user data directory (Electron `userData`) via:
+	* `OPEN_FIN_DB_PATH` (SQLite DB)
+	* `OPEN_FIN_KG_PATH` (Knowledge Graph JSON)
+* **LLM configuration:** For packaged builds, the backend loads environment variables from `OPEN_FIN_ENV_PATH` (defaults to a user-writable `.env` under `userData`).
+	* Hugging Face requires an OpenAI-compatible endpoint URL in `HF_BASE_URL` in addition to `HF_API_TOKEN`.
+
+
+### Other Documentation
+1. `frontend/README.md` - Style Guide
+2. `.claude/AGENT.md` - Phase/Feature Implementation Record

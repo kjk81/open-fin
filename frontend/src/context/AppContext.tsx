@@ -7,13 +7,16 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import type { BackendStatus, ChatMessage, PortfolioPosition, TickerInfo } from "../types";
+import type { BackendStatus, ChatMessage, PortfolioPosition, TickerInfo, WatchlistItem } from "../types";
 import {
   fetchHealth,
   fetchPortfolio,
   fetchTicker,
   postSystemEvent,
   streamChat,
+  fetchWatchlist,
+  addToWatchlist,
+  removeFromWatchlist,
 } from "../api";
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -21,6 +24,7 @@ import {
 interface AppState {
   backendStatus: BackendStatus;
   portfolio: PortfolioPosition[];
+  watchlist: WatchlistItem[];
   activeTicker: TickerInfo | null;
   activeTickerLoading: boolean;
   activeTickerError: string | null;
@@ -34,6 +38,7 @@ interface AppState {
 const initialState: AppState = {
   backendStatus: "connecting",
   portfolio: [],
+  watchlist: [],
   activeTicker: null,
   activeTickerLoading: false,
   activeTickerError: null,
@@ -49,6 +54,7 @@ const initialState: AppState = {
 type Action =
   | { type: "SET_BACKEND_STATUS"; status: BackendStatus }
   | { type: "SET_PORTFOLIO"; positions: PortfolioPosition[] }
+  | { type: "SET_WATCHLIST"; items: WatchlistItem[] }
   | { type: "SET_ACTIVE_TICKER"; ticker: TickerInfo | null }
   | { type: "SET_ACTIVE_TICKER_LOADING"; loading: boolean }
   | { type: "SET_ACTIVE_TICKER_ERROR"; error: string | null }
@@ -66,6 +72,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, backendStatus: action.status };
     case "SET_PORTFOLIO":
       return { ...state, portfolio: action.positions };
+    case "SET_WATCHLIST":
+      return { ...state, watchlist: action.items };
     case "SET_ACTIVE_TICKER":
       return { ...state, activeTicker: action.ticker };
     case "SET_ACTIVE_TICKER_LOADING":
@@ -103,6 +111,8 @@ interface AppContextValue {
   selectTicker: (symbol: string) => void;
   sendMessage: (text: string, contextRefs: string[]) => void;
   reloadPortfolio: () => void;
+  reloadWatchlist: () => void;
+  toggleWatchlist: (ticker: string) => Promise<void>;
   addSystemMessage: (content: string) => Promise<void>;
 }
 
@@ -146,10 +156,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(interval);
   }, []);
 
-  // Load portfolio when backend is ready
+  // Load portfolio and watchlist when backend is ready
   useEffect(() => {
     if (state.backendStatus !== "running") return;
     reloadPortfolio();
+    reloadWatchlist();
   }, [state.backendStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const reloadPortfolio = useCallback(async () => {
@@ -159,6 +170,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } catch {
       // non-fatal: just leave portfolio empty
     }
+  }, []);
+
+  const reloadWatchlist = useCallback(async () => {
+    try {
+      const items = await fetchWatchlist();
+      dispatch({ type: "SET_WATCHLIST", items });
+    } catch {
+      // non-fatal
+    }
+  }, []);
+
+  const toggleWatchlist = useCallback(async (ticker: string) => {
+    const sym = ticker.toUpperCase();
+    const inList = (await fetchWatchlist()).some((w) => w.ticker === sym);
+    if (inList) {
+      await removeFromWatchlist(sym);
+    } else {
+      await addToWatchlist(sym);
+    }
+    const items = await fetchWatchlist();
+    dispatch({ type: "SET_WATCHLIST", items });
   }, []);
 
   const selectTicker = useCallback((symbol: string) => {
@@ -257,7 +289,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AppContext.Provider value={{ state, selectTicker, sendMessage, reloadPortfolio, addSystemMessage }}>
+    <AppContext.Provider value={{ state, selectTicker, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage }}>
       {children}
     </AppContext.Provider>
   );

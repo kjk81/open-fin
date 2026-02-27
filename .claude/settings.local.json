@@ -11,7 +11,10 @@
       "Bash(pkill -f \"uvicorn main:app --port 8001\")",
       "Bash(npx tsc -p tsconfig.node.json)",
       "Bash(npx tsc -p tsconfig.json --noEmit)",
-      "Bash(npx tsc --noEmit)"
+      "Bash(npx tsc --noEmit)",
+      "Bash(npm install --save graphology graphology-types sigma @react-sigma/core @react-sigma/layout-forceatlas2 @tanstack/react-table @tanstack/react-virtual)",
+      "Bash(python -c \"from routers.graph import router; print\\(''graph router OK''\\)\")",
+      "Bash(python -c \"import main; print\\(''main.py OK''\\)\")"
     ],
     "additionalDirectories": [
       "c:\\Users\\kjk\\.claude\\projects\\c--Users-kjk-antiod-web-open-fin\\memory"

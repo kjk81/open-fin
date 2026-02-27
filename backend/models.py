@@ -34,6 +34,14 @@ class ReportCache(Base):
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class Watchlist(Base):
+    __tablename__ = "watchlist"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class LLMSettings(Base):
     __tablename__ = "llm_settings"
 

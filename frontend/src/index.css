@@ -42,6 +42,299 @@ body {
   50% { opacity: 0; }
 }
 
+/* ── Tab bar ───────────────────────────────────────────────────────────────── */
+
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-left: 16px;
+  -webkit-app-region: no-drag;
+}
+
+.tab {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  padding: 5px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  transition: color 0.15s, background 0.15s;
+}
+
+.tab.active {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.tab:hover:not(.active) {
+  color: var(--text);
+}
+
+/* ── Knowledge Graph Explorer ───────────────────────────────────────────────── */
+
+.kg-explorer {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  height: 100%;
+}
+
+.kg-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+.kg-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kg-toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.kg-search {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 5px 10px;
+  width: 200px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.kg-search:focus {
+  border-color: var(--accent);
+}
+
+.kg-search::placeholder {
+  color: var(--text-muted);
+}
+
+.kg-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 5px 8px;
+  outline: none;
+  cursor: pointer;
+}
+
+.kg-btn {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.kg-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.kg-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.kg-view-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.kg-view-toggle button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px 14px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.kg-view-toggle button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.kg-stats {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.kg-body {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Sigma fills parent */
+.kg-body > div {
+  width: 100%;
+  height: 100%;
+}
+
+/* ── KG Table View ──────────────────────────────────────────────────────────── */
+
+.kg-table-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.kg-table-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 14px;
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.kg-table-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  margin-bottom: -1px;
+}
+
+.kg-table-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.kg-table-scroll {
+  flex: 1;
+  overflow: auto;
+}
+
+.kg-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.kg-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.kg-table th:hover {
+  color: var(--text);
+}
+
+.kg-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
+.kg-table tr:hover td {
+  background: rgba(59, 130, 246, 0.07);
+}
+
+.kg-table tr.selected td {
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.kg-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kg-badge--ticker   { background: rgba(59,130,246,0.18); color: #60a5fa; }
+.kg-badge--sector   { background: rgba(34,197,94,0.18);  color: #4ade80; }
+.kg-badge--industry { background: rgba(245,158,11,0.18); color: #fbbf24; }
+.kg-badge--IN_SECTOR   { background: rgba(34,197,94,0.18);  color: #4ade80; }
+.kg-badge--IN_INDUSTRY { background: rgba(245,158,11,0.18); color: #fbbf24; }
+.kg-badge--CO_MENTION  { background: rgba(100,116,139,0.18); color: #94a3b8; }
+
+.kg-table-action {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.kg-table-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.kg-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  gap: 8px;
+  font-size: 14px;
+}
+
 /* ── Three-pane layout ─────────────────────────────────────────────────────── */
 
 .app-layout {

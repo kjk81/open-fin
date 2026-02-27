@@ -13,9 +13,16 @@ def get_ticker(symbol: str):
         ticker = yf.Ticker(symbol)
         info = ticker.info
 
-        if not info or info.get("trailingPegRatio") is None and info.get("symbol") is None:
-            # yfinance returns a dict with quoteType for valid tickers
-            pass
+        # Heuristic validity check: yfinance returns a dict, but invalid symbols
+        # often come back empty or without basic quote fields.
+        if not info or not isinstance(info, dict):
+            raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
+
+        quote_type = info.get("quoteType")
+        has_identity = bool(info.get("symbol") or info.get("longName") or info.get("shortName"))
+        has_price = info.get("currentPrice") is not None or info.get("regularMarketPrice") is not None
+        if quote_type is None and not (has_identity and has_price):
+            raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
 
         price = info.get("currentPrice") or info.get("regularMarketPrice")
         return {
@@ -32,6 +39,8 @@ def get_ticker(symbol: str):
             "dividend_yield": info.get("dividendYield"),
             "beta": info.get("beta"),
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Ticker lookup failed for %s: %s", symbol, exc)
         raise HTTPException(status_code=502, detail=f"Failed to fetch data for {symbol}: {exc}")

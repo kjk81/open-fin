@@ -30,6 +30,7 @@ backend/.mypy_cache/
 backend/.ruff_cache/
 backend/open_fin.db
 backend/*.db
+backend/open_fin_kg.json
 .venv/
 
 # ---- Frontend (Node / Vite / Electron) ----

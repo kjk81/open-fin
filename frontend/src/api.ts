@@ -5,6 +5,13 @@ import type {
   TradeResult,
   LlmSettings,
   LlmProvider,
+  WatchlistItem,
+  GraphSummary,
+  SubgraphData,
+  PaginatedNodes,
+  PaginatedEdges,
+  NodeQueryParams,
+  EdgeQueryParams,
 } from "./types";
 
 const API = "http://localhost:8000";
@@ -70,6 +77,23 @@ export async function updateLlmSettings(
   return res.json();
 }
 
+export async function fetchWatchlist(): Promise<WatchlistItem[]> {
+  const res = await fetch(`${API}/api/watchlist`);
+  if (!res.ok) throw new Error(`Watchlist fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function addToWatchlist(ticker: string): Promise<WatchlistItem> {
+  const res = await fetch(`${API}/api/watchlist/${encodeURIComponent(ticker)}`, { method: "POST" });
+  if (!res.ok) throw new Error(`Add to watchlist failed: ${res.status}`);
+  return res.json();
+}
+
+export async function removeFromWatchlist(ticker: string): Promise<void> {
+  const res = await fetch(`${API}/api/watchlist/${encodeURIComponent(ticker)}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) throw new Error(`Remove from watchlist failed: ${res.status}`);
+}
+
 export async function postSystemEvent(sessionId: string, content: string): Promise<void> {
   const res = await fetch(`${API}/api/chat/system_event`, {
     method: "POST",
@@ -77,6 +101,47 @@ export async function postSystemEvent(sessionId: string, content: string): Promi
     body: JSON.stringify({ session_id: sessionId, content }),
   });
   if (!res.ok) throw new Error(`System event failed: ${res.status}`);
+}
+
+// ── Knowledge Graph ──────────────────────────────────────────────────────────
+
+export async function fetchGraphSummary(): Promise<GraphSummary> {
+  const res = await fetch(`${API}/api/graph/summary`);
+  if (!res.ok) throw new Error(`Graph summary fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchGraphEgo(ticker: string, depth = 2): Promise<SubgraphData> {
+  const res = await fetch(
+    `${API}/api/graph/ego?ticker=${encodeURIComponent(ticker)}&depth=${depth}`,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `Ego fetch failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchGraphNodes(params: NodeQueryParams = {}): Promise<PaginatedNodes> {
+  const qs = new URLSearchParams();
+  if (params.kind) qs.set("kind", params.kind);
+  if (params.search) qs.set("search", params.search);
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  const res = await fetch(`${API}/api/graph/nodes?${qs}`);
+  if (!res.ok) throw new Error(`Graph nodes fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchGraphEdges(params: EdgeQueryParams = {}): Promise<PaginatedEdges> {
+  const qs = new URLSearchParams();
+  if (params.kind) qs.set("kind", params.kind);
+  if (params.source) qs.set("source", params.source);
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  const res = await fetch(`${API}/api/graph/edges?${qs}`);
+  if (!res.ok) throw new Error(`Graph edges fetch failed: ${res.status}`);
+  return res.json();
 }
 
 export async function streamChat(

@@ -22,8 +22,18 @@ def _route_after_context(state: ChatState) -> str:
     tickers = state.get("tickers_mentioned", [])
     intent = state.get("intent", "general_chat")
 
-    if tickers and intent != "general_chat":
-        logger.debug("Graph routing: ticker_lookup_node (tickers=%s)", tickers)
+    # If the user explicitly requested ticker context via @TICKER mentions,
+    # we should honor that even for general chat.
+    explicit_refs = [r for r in state.get("context_refs", []) if r and r != "user_portfolio"]
+    has_explicit_ticker_ref = len(explicit_refs) > 0
+
+    if tickers and (intent != "general_chat" or has_explicit_ticker_ref):
+        logger.debug(
+            "Graph routing: ticker_lookup_node (tickers=%s intent=%s explicit=%s)",
+            tickers,
+            intent,
+            has_explicit_ticker_ref,
+        )
         return "ticker_lookup_node"
 
     logger.debug("Graph routing: generation_node (no tickers or general chat)")
