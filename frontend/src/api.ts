@@ -218,6 +218,8 @@ export async function streamChat(
   onDone: () => void,
   onError: (err: string) => void,
   signal?: AbortSignal,
+  onToolEvent?: (event: import("./types").ToolEvent) => void,
+  onSources?: (sources: import("./types").SourceRef[]) => void,
 ): Promise<void> {
   let res: Response;
   try {
@@ -260,6 +262,17 @@ export async function streamChat(
           if (event.type === "token") onToken(event.content);
           else if (event.type === "done") onDone();
           else if (event.type === "error") onError(event.content ?? "Unknown error");
+          else if (event.type === "tool_start" && onToolEvent) {
+            onToolEvent({ tool: event.tool, status: "running", args: event.args });
+          } else if (event.type === "tool_end" && onToolEvent) {
+            onToolEvent({
+              tool: event.tool,
+              status: event.success === false ? "error" : "done",
+              durationMs: event.duration_ms,
+            });
+          } else if (event.type === "sources" && onSources) {
+            onSources(event.sources ?? []);
+          }
         } catch {
           // ignore malformed JSON
         }

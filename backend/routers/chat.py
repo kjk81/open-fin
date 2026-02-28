@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+import time
 from typing import AsyncGenerator
 
 from fastapi import APIRouter
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage
 
 from agent.graph import graph
+from agent.knowledge_graph import upsert_from_tool_results
 from database import SessionLocal
 from models import ChatHistory
 from datetime import datetime
@@ -36,11 +38,16 @@ def _sse(data: dict) -> str:
 
 async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     """
-    Run the LangGraph and yield SSE-formatted strings.
+    Run the LangGraph workflow and yield SSE-formatted strings.
 
-    astream_events(version="v2") emits granular per-token events.
-    We filter for "on_chat_model_stream" which fires for each token produced
-    inside generation_node's llm.astream() call.
+    Event types emitted:
+      tool_start  — a tool call has begun
+      tool_end    — a tool call completed (with duration + success flag)
+      token       — a single LLM output token
+      sources     — aggregated SourceRef list after graph completes
+      kg_update   — KG nodes/edges created during post-processing
+      done        — stream finished
+      error       — unrecoverable error
     """
     initial_state: dict = {
         "messages": [HumanMessage(content=request.message)],
@@ -50,14 +57,82 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "injected_context": "",
         "ticker_reports": {},
         "session_id": request.session_id,
+        # AgentState fields for the finance tool loop
+        "current_query": "",
+        "active_skills": [],
+        "tool_call_count": 0,
+        "tool_results": [],
     }
+
+    # Accumulators filled during streaming
+    accumulated_tool_results: list[dict] = []
+    accumulated_sources: list[dict] = []
+    tool_start_times: dict[str, float] = {}
 
     try:
         async for event in graph.astream_events(initial_state, version="v2"):
-            if event.get("event") == "on_chat_model_stream":
-                chunk = event.get("data", {}).get("chunk")
+            evt: str = event.get("event", "")
+            name: str = event.get("name", "")
+            data: dict = event.get("data", {})
+
+            if evt == "on_tool_start":
+                tool_start_times[name] = time.monotonic()
+                raw_input = data.get("input") or {}
+                # Keep args summary concise for the frontend chip
+                args_preview = {k: v for k, v in list(raw_input.items())[:3]}
+                yield _sse({"type": "tool_start", "tool": name, "args": args_preview})
+
+            elif evt == "on_tool_end":
+                started = tool_start_times.pop(name, time.monotonic())
+                duration_ms = int((time.monotonic() - started) * 1000)
+                output = data.get("output") or ""
+                success = True
+
+                if isinstance(output, str) and output:
+                    try:
+                        parsed = json.loads(output)
+                        success = bool(parsed.get("success", True))
+                        # Collect for KG post-processing
+                        accumulated_tool_results.append({
+                            "tool": name,
+                            "args": data.get("input") or {},
+                            "result": output,
+                        })
+                        # Collect citations — deduplicated by URL
+                        for src in parsed.get("sources") or []:
+                            url = src.get("url") or ""
+                            if url and not any(s["url"] == url for s in accumulated_sources):
+                                accumulated_sources.append({"url": url, "title": src.get("title") or url})
+                    except json.JSONDecodeError:
+                        pass
+
+                yield _sse({"type": "tool_end", "tool": name, "duration_ms": duration_ms, "success": success})
+
+            elif evt == "on_chat_model_stream":
+                chunk = data.get("chunk")
                 if chunk and hasattr(chunk, "content") and chunk.content:
                     yield _sse({"type": "token", "content": chunk.content})
+
+        # ── Post-graph side-effects ────────────────────────────────────────
+        kg_result: dict = {"nodes_created": 0, "edges_created": 0, "node_ids": []}
+        if accumulated_tool_results:
+            try:
+                kg_result = await upsert_from_tool_results(
+                    accumulated_tool_results,
+                    extra_sources=accumulated_sources,
+                )
+            except Exception as exc:
+                logger.error("KG post-processing error: %s", exc, exc_info=True)
+
+        if accumulated_sources:
+            yield _sse({"type": "sources", "sources": accumulated_sources})
+
+        if kg_result.get("nodes_created", 0) > 0 or kg_result.get("edges_created", 0) > 0:
+            yield _sse({
+                "type": "kg_update",
+                "nodes_created": kg_result["nodes_created"],
+                "edges_created": kg_result["edges_created"],
+            })
 
         yield _sse({"type": "done"})
 

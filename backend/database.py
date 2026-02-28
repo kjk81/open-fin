@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 
@@ -23,10 +24,12 @@ def _database_url() -> str:
 
 
 DATABASE_URL = _database_url()
+ASYNC_DATABASE_URL = DATABASE_URL.replace("sqlite:///", "sqlite+aiosqlite:///")
 
 engine = create_engine(
     DATABASE_URL, connect_args={"check_same_thread": False}
 )
+async_engine = create_async_engine(ASYNC_DATABASE_URL)
 
 
 @event.listens_for(engine, "connect")
@@ -37,7 +40,18 @@ def set_sqlite_pragma(dbapi_conn, connection_record):
     cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
+
+@event.listens_for(async_engine.sync_engine, "connect")
+def set_sqlite_pragma_async(dbapi_conn, connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.close()
+
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+AsyncSessionLocal = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
 
 
 class Base(DeclarativeBase):
@@ -50,3 +64,8 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+async def get_async_db():
+    async with AsyncSessionLocal() as session:
+        yield session

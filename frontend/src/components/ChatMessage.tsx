@@ -1,5 +1,5 @@
 import { useAppContext } from "../context/AppContext";
-import type { ChatMessage as ChatMessageType, TradeOrder } from "../types";
+import type { ChatMessage as ChatMessageType, SourceRef, ToolEvent, TradeOrder } from "../types";
 
 // Matches [TRADE: {...}] blocks emitted by the LLM
 const TRADE_RE = /\[TRADE:\s*(\{[^}]*\})\]/g;
@@ -14,18 +14,66 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
   const { selectTicker } = useAppContext();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
+  const isAssistant = !isUser && !isSystem;
 
   const parts = renderContent(message.content, selectTicker, onReviewTrade);
 
   return (
     <div className={`chat-message chat-message--${isUser ? "user" : isSystem ? "system" : "assistant"}`}>
       <div className="chat-bubble">
+        {isAssistant && message.toolEvents && message.toolEvents.length > 0 && (
+          <div className="tool-chips">
+            {message.toolEvents.map((e, i) => (
+              <ToolChip key={`${e.tool}-${i}`} event={e} />
+            ))}
+          </div>
+        )}
         {parts}
-        {isStreaming && !isUser && !isSystem && <span className="typing-cursor" />}
+        {isStreaming && isAssistant && <span className="typing-cursor" />}
+        {isAssistant && message.sources && message.sources.length > 0 && (
+          <CitationFooter sources={message.sources} />
+        )}
       </div>
       <div className="chat-meta">
         {isUser ? "You" : isSystem ? "System" : "Open-Fin AI"}
       </div>
+    </div>
+  );
+}
+
+function ToolChip({ event }: { event: ToolEvent }) {
+  const statusClass =
+    event.status === "running"
+      ? "tool-chip--running"
+      : event.status === "error"
+        ? "tool-chip--error"
+        : "tool-chip--done";
+
+  const label =
+    event.status === "running"
+      ? event.tool
+      : event.durationMs !== undefined
+        ? `${event.tool} ${event.durationMs}ms`
+        : event.tool;
+
+  return <span className={`tool-chip ${statusClass}`}>{label}</span>;
+}
+
+function CitationFooter({ sources }: { sources: SourceRef[] }) {
+  return (
+    <div className="chat-citations">
+      {sources.map((src, i) => (
+        <a
+          key={src.url}
+          className="citation-link"
+          href={src.url}
+          target="_blank"
+          rel="noreferrer"
+          title={src.url}
+        >
+          [{i + 1}] {src.title}
+        </a>
+      ))}
     </div>
   );
 }

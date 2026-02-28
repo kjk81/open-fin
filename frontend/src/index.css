@@ -702,6 +702,76 @@ body {
   background: rgba(59, 130, 246, 0.3);
 }
 
+/* ── Tool status chips ─────────────────────────────────────────────────────── */
+
+.tool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.tool-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-family: inherit;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border-left: 2px solid transparent;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.tool-chip--running {
+  border-left-color: var(--accent);
+  color: var(--accent);
+  animation: chip-pulse 1.4s ease-in-out infinite;
+}
+
+.tool-chip--done {
+  border-left-color: var(--green);
+}
+
+.tool-chip--error {
+  border-left-color: var(--red);
+  color: var(--red);
+}
+
+@keyframes chip-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.55; }
+}
+
+/* ── Citation footer ───────────────────────────────────────────────────────── */
+
+.chat-citations {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+}
+
+.citation-link {
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  max-width: 100%;
+  transition: color 0.15s;
+}
+
+.citation-link:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
 /* ── Mention popover ───────────────────────────────────────────────────────── */
 
 .mention-popover {

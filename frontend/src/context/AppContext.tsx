@@ -7,7 +7,7 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import type { BackendStatus, ChatMessage, PortfolioPosition, TickerInfo, WatchlistItem } from "../types";
+import type { BackendStatus, ChatMessage, PortfolioPosition, SourceRef, TickerInfo, ToolEvent, WatchlistItem } from "../types";
 import {
   fetchHealth,
   fetchPortfolio,
@@ -66,6 +66,8 @@ type Action =
   | { type: "ADD_CHAT_MESSAGE"; message: ChatMessage }
   | { type: "APPEND_TO_LAST_MESSAGE"; content: string }
   | { type: "SET_CHAT_STREAMING"; streaming: boolean }
+  | { type: "UPDATE_TOOL_EVENT"; event: ToolEvent }
+  | { type: "SET_LAST_MESSAGE_SOURCES"; sources: SourceRef[] }
   | { type: "SET_TICKER_REPORT"; report: string }
   | { type: "APPEND_TICKER_REPORT"; content: string }
   | { type: "SET_TICKER_REPORT_LOADING"; loading: boolean };
@@ -99,6 +101,28 @@ function reducer(state: AppState, action: Action): AppState {
     }
     case "SET_CHAT_STREAMING":
       return { ...state, chatStreaming: action.streaming };
+    case "UPDATE_TOOL_EVENT": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      const existing = last.toolEvents ?? [];
+      const idx = existing.findIndex((e) => e.tool === action.event.tool && e.status === "running");
+      const updated =
+        idx >= 0
+          ? [...existing.slice(0, idx), action.event, ...existing.slice(idx + 1)]
+          : [...existing, action.event];
+      msgs[msgs.length - 1] = { ...last, toolEvents: updated };
+      return { ...state, chatMessages: msgs };
+    }
+    case "SET_LAST_MESSAGE_SOURCES": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      msgs[msgs.length - 1] = { ...last, sources: action.sources };
+      return { ...state, chatMessages: msgs };
+    }
     case "SET_TICKER_REPORT":
       return { ...state, tickerReport: action.report };
     case "APPEND_TICKER_REPORT":
@@ -319,6 +343,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "APPEND_TO_LAST_MESSAGE", content: `\n[Error: ${err}]` });
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
       },
+      undefined, // signal
+      (toolEvent) => dispatch({ type: "UPDATE_TOOL_EVENT", event: toolEvent }),
+      (sources) => dispatch({ type: "SET_LAST_MESSAGE_SOURCES", sources }),
     );
   }, []);
 

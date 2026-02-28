@@ -29,6 +29,20 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: number;
+  toolEvents?: ToolEvent[];
+  sources?: SourceRef[];
+}
+
+export interface ToolEvent {
+  tool: string;
+  status: "running" | "done" | "error";
+  args?: Record<string, unknown>;
+  durationMs?: number;
+}
+
+export interface SourceRef {
+  url: string;
+  title: string;
 }
 
 export interface MentionOption {
