@@ -1,124 +1,239 @@
+"""Knowledge graph persistence layer — SQLite + FAISS backend.
+
+Replaces the former NetworkX/JSON implementation.
+
+Public API (unchanged from the NetworkX version so ``agent/nodes.py`` needs
+no edits):
+
+    upsert_ticker_snapshot(symbol, info, report_text)
+
+Internal wiring (called once from ``main.py`` lifespan):
+
+    set_faiss_manager(mgr)   — share the singleton FaissManager
+    set_write_queue(q)       — share the asyncio writer queue
+
+Write flow
+----------
+1. ``upsert_ticker_snapshot`` writes nodes/edges to SQLite synchronously.
+2. New/updated node IDs + their embedding texts are placed on the asyncio
+   write queue (non-blocking ``put_nowait``).
+3. The single writer task in ``main.py`` drains the queue and calls
+   ``FaissManager.upsert_vectors`` — ensuring serial, lock-protected writes
+   to the on-disk FAISS index.
+"""
+
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import os
+import re
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-import networkx as nx
+from sqlalchemy import select
+
+from database import SessionLocal
+from models import KGEdge, KGNode
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Co-mention stopwords (carried over from NetworkX implementation)
+# ---------------------------------------------------------------------------
 
 _CO_MENTION_STOPWORDS: frozenset[str] = frozenset(
     {
         # Finance / report boilerplate
-        "P",
-        "E",
-        "PE",
-        "EPS",
-        "TTM",
-        "YOY",
-        "QOQ",
-        "FCF",
-        "EBIT",
-        "EBITDA",
-        "ROI",
-        "ROE",
-        "ROA",
-        "USD",
-        "ETF",
+        "P", "E", "PE", "EPS", "TTM", "YOY", "QOQ", "FCF",
+        "EBIT", "EBITDA", "ROI", "ROE", "ROA", "USD", "ETF",
         # Generic English
-        "A",
-        "I",
-        "AN",
-        "THE",
-        "AND",
-        "OR",
-        "TO",
-        "IN",
-        "OF",
-        "ON",
-        "IS",
+        "A", "I", "AN", "THE", "AND", "OR", "TO", "IN", "OF", "ON", "IS",
     }
 )
 
+# ---------------------------------------------------------------------------
+# Module-level singletons (set during FastAPI lifespan startup)
+# ---------------------------------------------------------------------------
 
-def _kg_path() -> Path:
-    override = os.getenv("OPEN_FIN_KG_PATH")
-    if override:
-        path = Path(override).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path
-
-    return Path(__file__).resolve().parent.parent / "open_fin_kg.json"
+_faiss_mgr = None            # FaissManager | None
+_write_queue: asyncio.Queue | None = None
 
 
-def load_graph() -> nx.MultiDiGraph:
-    path = _kg_path()
-    if not path.exists():
-        return nx.MultiDiGraph()
-
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return nx.node_link_graph(raw, directed=True, multigraph=True)  # type: ignore[no-any-return]
-    except Exception as exc:
-        logger.warning("Failed to load KG from %s: %s", path, exc)
-        return nx.MultiDiGraph()
+def set_faiss_manager(mgr: Any) -> None:
+    """Register the shared :class:`~agent.vector_store.FaissManager` instance."""
+    global _faiss_mgr
+    _faiss_mgr = mgr
 
 
-def save_graph(graph: nx.MultiDiGraph) -> None:
-    path = _kg_path()
-    try:
-        payload = nx.node_link_data(graph)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception as exc:
-        logger.warning("Failed to save KG to %s: %s", path, exc)
+def set_write_queue(q: asyncio.Queue) -> None:
+    """Register the asyncio queue consumed by the single writer task."""
+    global _write_queue
+    _write_queue = q
 
 
-def upsert_ticker_snapshot(symbol: str, info: dict[str, Any] | None, report_text: str | None) -> None:
-    """Upsert simple relationships for a ticker.
+# ---------------------------------------------------------------------------
+# Internal SQLAlchemy helpers
+# ---------------------------------------------------------------------------
 
-    This is intentionally lightweight: it records sector/industry nodes and
-    creates edges between tickers that appear in the generated report.
+def _upsert_node(
+    db,
+    node_type: str,
+    name: str,
+    metadata: dict | None = None,
+) -> int:
+    """Insert-or-update a KGNode row; return its primary key.
+
+    Uses ``name`` as the unique key.  If a row already exists and
+    ``metadata`` is provided, the stored JSON blob is merged (existing
+    keys win).
     """
+    existing = db.execute(
+        select(KGNode).where(KGNode.name == name, KGNode.is_deleted == False)
+    ).scalar_one_or_none()
 
+    if existing is not None:
+        if metadata:
+            merged = json.loads(existing.metadata_json or "{}")
+            merged.update(metadata)
+            existing.metadata_json = json.dumps(merged)
+        existing.updated_at = datetime.utcnow()
+        db.flush()
+        return existing.id
+
+    node = KGNode(
+        node_type=node_type,
+        name=name,
+        metadata_json=json.dumps(metadata or {}),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(node)
+    db.flush()  # populate node.id without committing the transaction
+    return node.id
+
+
+def _upsert_edge(
+    db,
+    source_id: int,
+    target_id: int,
+    relationship: str,
+) -> None:
+    """Insert a KGEdge if an identical one does not already exist."""
+    exists = db.execute(
+        select(KGEdge).where(
+            KGEdge.source_id == source_id,
+            KGEdge.target_id == target_id,
+            KGEdge.relationship == relationship,
+        )
+    ).scalar_one_or_none()
+    if exists is None:
+        db.add(KGEdge(source_id=source_id, target_id=target_id, relationship=relationship))
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def upsert_ticker_snapshot(
+    symbol: str,
+    info: dict[str, Any] | None,
+    report_text: str | None,
+) -> None:
+    """Persist a ticker snapshot to SQLite and enqueue FAISS vector updates.
+
+    Parameters
+    ----------
+    symbol:
+        Ticker symbol (e.g. ``"AAPL"``).  Normalised to uppercase.
+    info:
+        yfinance ``Ticker.info`` dict.  Used to extract sector, industry,
+        and company name.  May be ``None`` if the fetch failed.
+    report_text:
+        LLM-generated analysis text.  Used to extract co-mention edges via
+        simple regex.  May be ``None``.
+    """
     symbol = symbol.upper().strip()
     if not symbol:
         return
 
-    graph = load_graph()
+    db = SessionLocal()
+    new_node_ids: list[int] = []
+    new_node_texts: list[str] = []
 
-    graph.add_node(symbol, kind="ticker", updated_at=datetime.utcnow().isoformat())
+    try:
+        # --- Ticker node ---
+        meta: dict[str, Any] = {}
+        if info:
+            meta = {
+                "company_name": info.get("shortName") or info.get("longName") or "",
+                "sector": info.get("sector") or "",
+                "industry": info.get("industry") or "",
+            }
 
-    if info:
-        sector = (info.get("sector") or "").strip()
-        industry = (info.get("industry") or "").strip()
+        ticker_id = _upsert_node(db, "ticker", symbol, meta)
+        new_node_ids.append(ticker_id)
+        if _faiss_mgr is not None:
+            new_node_texts.append(_faiss_mgr.text_for_node("ticker", symbol, meta))
+        else:
+            new_node_texts.append(symbol)
 
-        if sector:
-            sector_node = f"sector:{sector}"
-            graph.add_node(sector_node, kind="sector")
-            graph.add_edge(symbol, sector_node, kind="IN_SECTOR")
+        # --- Sector / industry nodes and edges ---
+        if info:
+            sector = (info.get("sector") or "").strip()
+            industry = (info.get("industry") or "").strip()
 
-        if industry:
-            industry_node = f"industry:{industry}"
-            graph.add_node(industry_node, kind="industry")
-            graph.add_edge(symbol, industry_node, kind="IN_INDUSTRY")
+            if sector:
+                sector_name = f"sector:{sector}"
+                sector_id = _upsert_node(db, "sector", sector_name)
+                _upsert_edge(db, ticker_id, sector_id, "IN_SECTOR")
+                new_node_ids.append(sector_id)
+                if _faiss_mgr is not None:
+                    new_node_texts.append(_faiss_mgr.text_for_node("sector", sector_name))
+                else:
+                    new_node_texts.append(sector_name)
 
-    if report_text:
-        # Naive co-mention extraction for relationships (kept local-only).
-        # Filter out obvious abbreviations/noise so the KG remains useful.
-        import re
+            if industry:
+                industry_name = f"industry:{industry}"
+                industry_id = _upsert_node(db, "industry", industry_name)
+                _upsert_edge(db, ticker_id, industry_id, "IN_INDUSTRY")
+                new_node_ids.append(industry_id)
+                if _faiss_mgr is not None:
+                    new_node_texts.append(_faiss_mgr.text_for_node("industry", industry_name))
+                else:
+                    new_node_texts.append(industry_name)
 
-        candidates = set(re.findall(r"\b[A-Z]{1,10}\b", report_text))
-        candidates.discard(symbol)
-        for other in sorted(candidates):
-            if other in _CO_MENTION_STOPWORDS:
-                continue
-            if 1 <= len(other) <= 10:
-                graph.add_node(other, kind="ticker")
-                graph.add_edge(symbol, other, kind="CO_MENTION")
+        # --- Co-mention edges ---
+        if report_text:
+            candidates = set(re.findall(r"\b[A-Z]{1,10}\b", report_text))
+            candidates.discard(symbol)
+            for other in sorted(candidates):
+                if other in _CO_MENTION_STOPWORDS:
+                    continue
+                if 1 <= len(other) <= 10:
+                    other_id = _upsert_node(db, "ticker", other)
+                    _upsert_edge(db, ticker_id, other_id, "CO_MENTION")
+                    new_node_ids.append(other_id)
+                    if _faiss_mgr is not None:
+                        new_node_texts.append(_faiss_mgr.text_for_node("ticker", other))
+                    else:
+                        new_node_texts.append(other)
 
-    save_graph(graph)
+        db.commit()
+        logger.debug("KG upsert committed for %s (%d nodes).", symbol, len(new_node_ids))
+
+    except Exception:
+        db.rollback()
+        logger.exception("KG upsert failed for %s.", symbol)
+        return
+    finally:
+        db.close()
+
+    # --- Enqueue FAISS vector update (non-blocking) ---
+    if _write_queue is not None and new_node_ids:
+        try:
+            _write_queue.put_nowait(("upsert", new_node_ids, new_node_texts))
+        except asyncio.QueueFull:
+            logger.warning(
+                "FAISS write queue is full — vectors for %s will be stale until next rebuild.",
+                symbol,
+            )

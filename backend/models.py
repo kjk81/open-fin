@@ -91,3 +91,32 @@ class WorkerStatus(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     pid: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="running")
+
+
+class KGNode(Base):
+    """Persistent knowledge graph node; `id` doubles as the FAISS vector ID."""
+
+    __tablename__ = "kg_nodes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    node_type: Mapped[str] = mapped_column(String(20), index=True)  # "ticker" | "sector" | "industry"
+    name: Mapped[str] = mapped_column(String(200), unique=True, index=True)  # e.g. "AAPL", "sector:Technology"
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class KGEdge(Base):
+    """Persistent knowledge graph edge between two KGNodes."""
+
+    __tablename__ = "kg_edges"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("kg_nodes.id", ondelete="CASCADE"), index=True
+    )
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("kg_nodes.id", ondelete="CASCADE"), index=True
+    )
+    relationship: Mapped[str] = mapped_column(String(30), index=True)  # "IN_SECTOR" | "IN_INDUSTRY" | "CO_MENTION"
+    weight: Mapped[float] = mapped_column(Float, default=1.0)

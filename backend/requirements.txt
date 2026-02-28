@@ -11,3 +11,6 @@ langchain-google-genai>=2.0.0
 langchain-ollama>=0.2.0
 networkx>=3.0
 apscheduler>=3.10
+faiss-cpu>=1.7.4
+filelock>=3.13
+fastembed>=0.3.0
