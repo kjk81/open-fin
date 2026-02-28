@@ -15,10 +15,9 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from bs4 import BeautifulSoup
-import markdownify
 
 from clients.http_base import HttpClient, HttpClientError
 from database import SessionLocal
@@ -31,6 +30,7 @@ from schemas.tool_contracts import (
     ToolTiming,
     WebSearchResult,
 )
+from tools._utils import html_to_markdown, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,6 @@ _STRIP_TAGS: list[str] = ["script", "style", "nav", "footer", "header", "aside"]
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _now_utc() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
-
-
 def _cache_get(url: str) -> str | None:
     """Return cached response text if a fresh entry exists, else None."""
     db = SessionLocal()
@@ -54,7 +50,7 @@ def _cache_get(url: str) -> str | None:
         if row is None:
             return None
         expiry = row.fetched_at + timedelta(seconds=row.ttl_seconds)
-        if _now_utc() > expiry:
+        if now_utc() > expiry:
             return None
         return row.response_text
     finally:
@@ -71,19 +67,11 @@ def _cache_put(url: str, text: str) -> None:
             db.add(row)
         else:
             row.response_text = text
-            row.fetched_at = _now_utc()
+            row.fetched_at = now_utc()
             row.ttl_seconds = _FETCH_TTL_SECONDS
         db.commit()
     finally:
         db.close()
-
-
-def _html_to_markdown(html: str) -> str:
-    """Strip boilerplate tags then convert HTML → dense Markdown."""
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(_STRIP_TAGS):
-        tag.decompose()
-    return markdownify.markdownify(str(soup), heading_style="ATX", strip=["a"])
 
 
 def _extract_title(html: str, fallback: str) -> str:
@@ -110,7 +98,7 @@ async def web_fetch(
         ``"markdown"`` (default) converts HTML → Markdown via markdownify.
         ``"text"`` returns plain text via BeautifulSoup's ``.get_text()``.
     """
-    started_at = _now_utc()
+    started_at = now_utc()
 
     try:
         # 1. Cache check -------------------------------------------------------
@@ -132,14 +120,14 @@ async def web_fetch(
                     tag.decompose()
                 content = soup.get_text(separator="\n", strip=True)
             else:
-                content = _html_to_markdown(raw_html)
+                content = html_to_markdown(raw_html)
 
             title = _extract_title(raw_html, url)
 
             # 4. Cache write ---------------------------------------------------
             _cache_put(url, raw_html)
 
-        ended_at = _now_utc()
+        ended_at = now_utc()
         doc = WebDocument(
             url=url,  # type: ignore[arg-type]
             title=title,
@@ -161,7 +149,7 @@ async def web_fetch(
         )
 
     except (HttpClientError, Exception) as exc:
-        ended_at = _now_utc()
+        ended_at = now_utc()
         logger.warning("web_fetch failed for %s: %s", url, exc)
         # Return a minimal failed result with a placeholder doc
         return ToolResult(
@@ -208,7 +196,7 @@ async def web_search(
     EXA_API_KEY
         Required when ``provider="exa"``.
     """
-    started_at = _now_utc()
+    started_at = now_utc()
 
     try:
         if provider == "tavily":
@@ -218,7 +206,7 @@ async def web_search(
         else:
             raise ValueError(f"Unknown provider: {provider!r}. Use 'tavily' or 'exa'.")
 
-        ended_at = _now_utc()
+        ended_at = now_utc()
         result_data = WebSearchResult(query=query, hits=hits, provider=provider)
         sources = [
             SourceRef(url=h.url, title=h.title, fetched_at=ended_at)
@@ -236,7 +224,7 @@ async def web_search(
         )
 
     except Exception as exc:
-        ended_at = _now_utc()
+        ended_at = now_utc()
         logger.warning("web_search failed (provider=%s, query=%r): %s", provider, query, exc)
         return ToolResult(
             data=WebSearchResult(query=query, hits=[], provider=provider),

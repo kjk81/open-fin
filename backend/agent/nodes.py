@@ -44,6 +44,11 @@ _SCREENING_KEYWORDS = frozenset({
     "screen", "screener", "filter stocks", "find stocks", "undervalued",
     "high cash flow", "low pe", "value stocks", "stock screen",
 })
+_SEC_FILINGS_KEYWORDS = frozenset({
+    "sec filing", "sec filings", "10-k", "10-k/a", "10-q", "10-q/a",
+    "10k", "10q", "annual report", "quarterly report", "risk factors",
+    "management discussion", "md&a", "mda", "item 1a", "item 7",
+})
 _PORTFOLIO_KEYWORDS = frozenset({
     "portfolio", "holdings", "positions", "my stocks", "my holdings", "my shares",
 })
@@ -65,6 +70,8 @@ async def intent_router(state: ChatState) -> dict:
     # --- Classify intent ---
     if any(kw in lower for kw in _SCREENING_KEYWORDS):
         intent = "stock_screening"
+    elif any(kw in lower for kw in _SEC_FILINGS_KEYWORDS):
+        intent = "sec_filings"
     elif any(kw in lower for kw in _TRADE_KEYWORDS):
         intent = "trade_recommendation"
     elif any(kw in lower for kw in _DEEP_DIVE_KEYWORDS):
@@ -359,6 +366,44 @@ async def screening_node(state: ChatState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node 3c: FilingsNode
+# ---------------------------------------------------------------------------
+async def filings_node(state: ChatState) -> dict:
+    """Read SEC filings via structured planning + targeted section extraction."""
+    from tools.sec_filings import read_filings
+
+    user_text = ""
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, HumanMessage):
+            user_text = msg.content
+            break
+
+    if not user_text.strip():
+        return {"filings_context": ""}
+
+    result = await read_filings(user_text)
+    if not result.success:
+        error_text = result.error or "Unknown SEC filing retrieval error."
+        return {"filings_context": f"SEC filings retrieval failed: {error_text}"}
+
+    lines = ["SEC FILING EXTRACTS:"]
+    lines.append(f"Planned ticker: {result.data.plan.ticker}")
+    lines.append(f"Form types: {', '.join(result.data.plan.form_types)}")
+    lines.append(f"Sections: {', '.join(result.data.plan.section_focus)}")
+
+    for filing in result.data.filings:
+        lines.append(
+            f"\n[{filing.form_type}] {filing.company_name} | "
+            f"Filed: {filing.filed_date} | Accession: {filing.accession_number}"
+        )
+        lines.append(f"Source: {filing.filing_url}")
+        for section in filing.sections:
+            lines.append(f"\n### {section.section_name}\n{section.content_md}")
+
+    return {"filings_context": "\n".join(lines)}
+
+
+# ---------------------------------------------------------------------------
 # Node 4: GenerationNode
 # ---------------------------------------------------------------------------
 async def generation_node(state: ChatState) -> dict:
@@ -420,6 +465,10 @@ async def generation_node(state: ChatState) -> dict:
         if screening_results.get("error"):
             screen_lines.append(f"\nNote: {screening_results['error']}")
         system_parts.append("\n".join(screen_lines))
+
+    filings_context = state.get("filings_context", "")
+    if filings_context:
+        system_parts.append(f"\n\nSEC FILINGS CONTEXT:\n{filings_context}")
 
     # --- Anomaly context injection ---
     anomaly_context = state.get("anomaly_context", "")

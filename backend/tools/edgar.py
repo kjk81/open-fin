@@ -23,22 +23,14 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import date
 
 from clients.edgar import EdgarClient
 from schemas.finance import Filing8K, Filing8KDetail
-from schemas.tool_contracts import SourceRef, ToolResult, ToolTiming
+from schemas.tool_contracts import SourceRef, ToolResult
+from tools._utils import build_timing, now_utc
 
 logger = logging.getLogger(__name__)
-
-
-def _now_utc() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
-
-
-def _timing(tool_name: str, started_at: datetime) -> ToolTiming:
-    return ToolTiming(tool_name=tool_name, started_at=started_at, ended_at=_now_utc())
-
 
 # ---------------------------------------------------------------------------
 # get_recent_8k_filings
@@ -57,7 +49,7 @@ async def get_recent_8k_filings(
     limit:
         Maximum number of 8-K filings to return, ordered most-recent first.
     """
-    started_at = _now_utc()
+    started_at = now_utc()
     tool_name = "get_recent_8k_filings"
 
     try:
@@ -66,7 +58,7 @@ async def get_recent_8k_filings(
             if cik is None:
                 return ToolResult(
                     data=[],
-                    timing=_timing(tool_name, started_at),
+                    timing=build_timing(tool_name, started_at),
                     success=False,
                     error=(
                         f"Could not resolve {symbol!r} to a CIK. "
@@ -135,9 +127,9 @@ async def get_recent_8k_filings(
             sources=[SourceRef(
                 url=edgar_index_url,  # type: ignore[arg-type]
                 title=f"SEC EDGAR 8-K filings: {company_name}",
-                fetched_at=_now_utc(),
+                fetched_at=now_utc(),
             )],
-            timing=_timing(tool_name, started_at),
+            timing=build_timing(tool_name, started_at),
             success=True,
         )
 
@@ -145,7 +137,7 @@ async def get_recent_8k_filings(
         logger.warning("get_recent_8k_filings(%s): %s", symbol, exc)
         return ToolResult(
             data=[],
-            timing=_timing(tool_name, started_at),
+            timing=build_timing(tool_name, started_at),
             success=False,
             error=str(exc),
         )
@@ -166,7 +158,7 @@ async def get_8k_detail(filing: Filing8K) -> ToolResult[Filing8KDetail]:
     filing:
         A ``Filing8K`` returned by ``get_recent_8k_filings``.
     """
-    started_at = _now_utc()
+    started_at = now_utc()
     tool_name = "get_8k_detail"
 
     try:
@@ -261,9 +253,9 @@ async def get_8k_detail(filing: Filing8K) -> ToolResult[Filing8KDetail]:
             sources=[SourceRef(
                 url=filing.filing_url,  # type: ignore[arg-type]
                 title=f"8-K: {filing.company_name} ({filing.filed_date})",
-                fetched_at=_now_utc(),
+                fetched_at=now_utc(),
             )],
-            timing=_timing(tool_name, started_at),
+            timing=build_timing(tool_name, started_at),
             success=True,
         )
 
@@ -275,7 +267,7 @@ async def get_8k_detail(filing: Filing8K) -> ToolResult[Filing8KDetail]:
                 full_text="",
                 extracted_items={},
             ),
-            timing=_timing(tool_name, started_at),
+            timing=build_timing(tool_name, started_at),
             success=False,
             error=str(exc),
         )

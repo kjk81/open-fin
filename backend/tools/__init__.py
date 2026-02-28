@@ -13,6 +13,7 @@ from tools.finance import (
     validate_ticker,
 )
 from tools.edgar import get_8k_detail, get_recent_8k_filings
+from tools.sec_filings import extract_filing_sections, get_filings_metadata, read_filings
 from tools.web import web_fetch, web_search
 
 __all__ = [
@@ -31,6 +32,9 @@ __all__ = [
     # SEC EDGAR — 8-K filings
     "get_recent_8k_filings",
     "get_8k_detail",
+    "get_filings_metadata",
+    "extract_filing_sections",
+    "read_filings",
     # Web research
     "web_fetch",
     "web_search",

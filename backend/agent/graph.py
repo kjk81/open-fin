@@ -7,6 +7,7 @@ from .nodes import (
     context_injector,
     ticker_lookup_node,
     screening_node,
+    filings_node,
     generation_node,
 )
 
@@ -29,6 +30,10 @@ def _route_after_context(state: ChatState) -> str:
     if intent == "stock_screening":
         logger.debug("Graph routing: screening_node (intent=%s)", intent)
         return "screening_node"
+
+    if intent == "sec_filings":
+        logger.debug("Graph routing: filings_node (intent=%s)", intent)
+        return "filings_node"
 
     # If the user explicitly requested ticker context via @TICKER mentions,
     # we should honor that even for general chat.
@@ -67,6 +72,7 @@ def build_graph():
     builder.add_node("context_injector", context_injector)
     builder.add_node("ticker_lookup_node", ticker_lookup_node)
     builder.add_node("screening_node", screening_node)
+    builder.add_node("filings_node", filings_node)
     builder.add_node("generation_node", generation_node)
 
     builder.add_edge(START, "intent_router")
@@ -78,12 +84,14 @@ def build_graph():
         {
             "ticker_lookup_node": "ticker_lookup_node",
             "screening_node": "screening_node",
+            "filings_node": "filings_node",
             "generation_node": "generation_node",
         },
     )
 
     builder.add_edge("ticker_lookup_node", "generation_node")
     builder.add_edge("screening_node", "generation_node")
+    builder.add_edge("filings_node", "generation_node")
     builder.add_edge("generation_node", END)
 
     return builder.compile()

@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -160,3 +160,38 @@ class Filing8KDetail(BaseModel):
     filing: Filing8K
     full_text: str                         # truncated to ≤50 K chars for LLM consumption
     extracted_items: dict[str, str]        # {"Item 2.02": "text of that item ..."}
+
+
+class FilingPlan(BaseModel):
+    """Structured plan for multi-step SEC filing retrieval."""
+
+    ticker: str
+    form_types: list[str] = Field(default_factory=lambda: ["10-K", "10-Q"])
+    section_focus: list[str] = Field(default_factory=lambda: ["Risk Factors", "Management Discussion"])
+    num_filings: int = 3
+
+
+class FilingSection(BaseModel):
+    """Single extracted filing section in markdown form."""
+
+    section_name: str
+    content_md: str
+    char_count: int
+
+
+class FilingExtract(BaseModel):
+    """Extracted sections and metadata for one filing."""
+
+    accession_number: str
+    filed_date: date
+    form_type: str
+    company_name: str
+    filing_url: str
+    sections: list[FilingSection] = Field(default_factory=list)
+
+
+class FilingsResult(BaseModel):
+    """Final output from the read_filings meta-tool."""
+
+    plan: FilingPlan
+    filings: list[FilingExtract]

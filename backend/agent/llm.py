@@ -305,6 +305,26 @@ class FallbackLLM:
             "For HuggingFace, set both HF_API_TOKEN and HF_BASE_URL (OpenAI-compatible endpoint)."
         ) from last_error
 
+    async def ainvoke_structured(self, messages: list[BaseMessage], schema: type):
+        """Invoke the first healthy provider with structured output enabled."""
+        last_error: Exception | None = None
+        for provider in self.fallback_order:
+            model = _provider_model(provider)
+            if model is None:
+                continue
+            try:
+                logger.info("LLM structured invoke provider=%s schema=%s", provider, getattr(schema, "__name__", str(schema)))
+                structured_model = model.with_structured_output(schema)
+                return await structured_model.ainvoke(messages)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("LLM structured invoke failed provider=%s error=%s", provider, exc)
+
+        raise RuntimeError(
+            "No LLM provider available or all providers failed for structured output. "
+            "Configure at least one provider in backend/.env (or the app settings)."
+        ) from last_error
+
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
         last_error: Exception | None = None
         for provider in self.fallback_order:
