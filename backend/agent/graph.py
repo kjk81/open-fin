@@ -6,6 +6,7 @@ from .nodes import (
     intent_router,
     context_injector,
     ticker_lookup_node,
+    screening_node,
     generation_node,
 )
 
@@ -14,13 +15,20 @@ logger = logging.getLogger(__name__)
 
 def _route_after_context(state: ChatState) -> str:
     """
-    Conditional edge: after context_injector, decide whether ticker lookup is needed.
+    Conditional edge: after context_injector, decide which processing node is needed.
 
-    Routes to ticker_lookup_node when tickers are mentioned AND intent is not
-    general_chat (pure chitchat doesn't warrant fundamentals lookup).
+    Routes to:
+    - screening_node when intent is stock_screening
+    - ticker_lookup_node when tickers are mentioned AND intent is not general_chat
+    - generation_node otherwise (pure chitchat)
     """
     tickers = state.get("tickers_mentioned", [])
     intent = state.get("intent", "general_chat")
+
+    # Stock screening requests always go to the screening node
+    if intent == "stock_screening":
+        logger.debug("Graph routing: screening_node (intent=%s)", intent)
+        return "screening_node"
 
     # If the user explicitly requested ticker context via @TICKER mentions,
     # we should honor that even for general chat.
@@ -47,6 +55,8 @@ def build_graph():
     Topology:
         START → intent_router → context_injector
                                       ↓ (conditional)
+                           intent == "stock_screening"?
+                              Yes → screening_node → generation_node → END
                            tickers AND not general_chat?
                               Yes → ticker_lookup_node → generation_node → END
                               No  →                      generation_node → END
@@ -56,6 +66,7 @@ def build_graph():
     builder.add_node("intent_router", intent_router)
     builder.add_node("context_injector", context_injector)
     builder.add_node("ticker_lookup_node", ticker_lookup_node)
+    builder.add_node("screening_node", screening_node)
     builder.add_node("generation_node", generation_node)
 
     builder.add_edge(START, "intent_router")
@@ -66,11 +77,13 @@ def build_graph():
         _route_after_context,
         {
             "ticker_lookup_node": "ticker_lookup_node",
+            "screening_node": "screening_node",
             "generation_node": "generation_node",
         },
     )
 
     builder.add_edge("ticker_lookup_node", "generation_node")
+    builder.add_edge("screening_node", "generation_node")
     builder.add_edge("generation_node", END)
 
     return builder.compile()

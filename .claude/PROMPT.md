@@ -248,7 +248,7 @@ Constraints: Use strict PEP-8 typing. Ensure all Pydantic schemas map cleanly to
 
 # Dexter Tool/Skill Port
 
-## Phase 
+## Phase 1: Foundational Schemas & Base Clients
 Context: We are porting a financial research tool into our Open-Fin Python backend. Read AGENTS.md for our architecture. Note that we have recently replaced NetworkX with a SQLite+FAISS knowledge graph engine.
 Task: Implement the foundational Pydantic data schemas and robust HTTP clients for our toolset.
 Steps:
@@ -261,3 +261,116 @@ Create backend/clients/http_base.py. Implement an asynchronous httpx.AsyncClient
 
 Update backend/database.py to add two new SQLite SQLAlchemy models: http_cache (url, response_text, fetched_at, ttl_seconds) and sources (url, title, tool). (Note: KGNode and KGEdge are already present).
 Constraints: Use strict PEP-8 typing. Ensure all Pydantic schemas map cleanly to the new KGNode and KGEdge SQLAlchemy models so they can be seamlessly embedded into FAISS.
+
+## Phase 2: Web Extraction
+
+Context: Building on backend/schemas/tool_contracts.py, we need to implement web research tools.
+Task: Port the web extraction and search capabilities.
+Steps:
+
+Create backend/tools/web.py.
+
+Implement web_fetch(url, extract_mode). Use the base HTTP client to fetch HTML. Use BeautifulSoup4 and markdownify to extract readable content and convert it to dense Markdown. Wrap the output in the ToolResult[WebDocument] schema.
+
+Implement caching: Check the SQLite http_cache table before fetching; write to it after a successful fetch with a 15-minute TTL.
+
+Implement web_search(query). Create a provider-agnostic function that defaults to the Tavily Python SDK (or Exa if specified). Normalize the response into a structured WebSearchResult Pydantic model.
+Constraints: Do not use Playwright yet. Keep extraction strictly to static HTML-to-Markdown to optimize LLM context windows.
+
+## Phase 3: Dual-Score Financial Primitives
+Context: We are implementing financial data tools in backend/tools/finance.py, strictly dividing responsibilities between yfinance and FMP (Financial Modeling Prep).
+Task: Build the financial primitives using a dual-source strategy and specific interaction pipelines.
+Steps:
+
+Implement yfinance Tools: Build this as the "Market Action" tool to handle high-frequency, surface-level market data and technicals. Target its implementation for driving frontend charting (OHLCV), validating basic ticker existence, polling for price/volume anomalies, and acting as a zero-setup fallback.
+
+Implement FMP Tools: Build this as the "Fundamental Research" tool to provide dense, structured financial context for LLM reasoning and Knowledge Graph (KG) ingestion. Target its implementation to fetch SEC filings (10-K/10-Q), extract earnings call transcripts, determine institutional sentiment, and discover peer relationships for KG edges.
+
+Build the Trigger Pipeline: Create a lightweight background worker that uses yfinance to monitor for technical anomalies (e.g., a 5% price drop). Upon triggering, ensure it passes the context to the LangGraph agent, which will then use FMP to research why it happened by checking recent news or filings.
+
+Build the Screening Pipeline: Configure the LangGraph agent to use FMP to screen for fundamental criteria (e.g., undervalued P/E, high cash flow). Before returning the list to the user, strictly require the agent to cross-reference yfinance to append current moving averages or immediate entry setups.
+
+Implement Graceful Degradation: Ensure LangGraph tools always default to FMP for deep research. Write exception handling so that if FMP hits an API limit or lacks an API key, the tool catches the exception and falls back to a limited, best-effort extraction using yfinance, explicitly notifying the user of the reduced data quality.
+Constraints: Do not mix data sources in a single function without explicit fallback logic. yfinance data is fragile and poorly suited for LLMs; FMP data is highly stable and excellent for LLMs due to clean JSON schemas.
+
+## Phase 4: SEC Filings workflow
+Context: SEC filings require a two-step generative process to avoid blowing out the context window.
+Task: Implement the read_filings meta-tool logic.
+Steps:
+
+Create backend/tools/sec_filings.py.
+
+Define a structured planner Pydantic model: FilingPlan containing ticker, form_types (e.g., 10-K, 10-Q), and specific section focus (e.g., Risk Factors, Management Discussion).
+
+Implement get_filings_metadata(ticker) to fetch recent filing URLs and accession numbers.
+
+Implement extract_filing_sections(filing_url, sections).
+
+Create the wrapper tool read_filings(query) which first invokes an LLM with .with_structured_output(FilingPlan) to parse the natural language query, then executes the fetch and extraction.
+Constraints: Do not dump raw 10-K HTML into the return object. It must be truncated, parsed Markdown.
+
+## Phase 5: Meta-Tool Routing (LangGraph)
+Context: We need to replace Dexter's CLI orchestrator with our LangGraph state machine. > Task: Implement the core decision graph in backend/agent/graph.py.
+Steps:
+
+Define the AgentState TypedDict. Include keys for messages, current_query, active_skills, and tool_call_count.
+
+Create the route_finance_query node. Bind all tools from backend/tools/finance.py and sec_filings.py to the LLM.
+
+Create the execute_tool_calls node to trigger the selected Python tools and append the ToolResult data to the state.
+
+Add conditional edges to prevent infinite loops: evaluate tool_call_count and force an exit to a finalize_response node if the threshold exceeds 5.
+Constraints: Enforce a "single-call meta tool" policy in the system prompt—instruct the LLM to gather all required financial data in one parallel tool call block when possible.
+
+## Phase 6: Analytical Skills Framework
+Context: Dexter uses YAML/Markdown files to define reusable analytical playbooks (Skills).
+Task: Port the skills framework to drive repeatable LangGraph workflows.
+Steps:
+
+Create a directory backend/agent/skills/ and add a sample dcf_analysis.md with YAML frontmatter (name, description) and Markdown instructions.
+
+Create backend/agent/skills_loader.py. Write a utility using python-frontmatter to parse these files into a Skill Pydantic model.
+
+Create a LangChain @tool called load_skill(skill_name).
+
+Update the LangGraph state in graph.py to track executed_skills. Ensure the orchestrator rejects requests to run the exact same skill twice in one session.
+
+## Phase 7: FAST API Integration & Graph Sync
+Context: The backend capabilities are complete. We must now expose them to the Electron/React frontend and sync the results with our new SQLite+FAISS knowledge graph.
+Task: Wire the LangGraph workflow to FastAPI and handle Knowledge Graph side-effects.
+Steps:
+
+Update backend/routers/chat.py. Create a /chat POST endpoint that accepts a user query and streams the LangGraph events back to the client (yielding tool starts, tool completions, and final LLM tokens).
+
+Implement a post-processing hook: after the graph completes, iterate through all ToolResult objects in the state.
+
+Transform the extracted entities into SQLAlchemy KGNode and KGEdge formats. Pass these to the rewritten backend/agent/knowledge_graph.py APIs (e.g., upsert_ticker_snapshot), which will handle synchronous SQLite writes and safely enqueue the text chunks to the faiss_writer_loop for async embedding.
+
+Update the frontend frontend/src/components/Chat.tsx to handle the new streamed event format and display citations alongside the text.
+Constraints: Do not use NetworkX. Rely entirely on the SQLAlchemy integration and the FaissManager concurrency model already established in the backend.
+
+## Phase 8: Mock Terminal UI for Agentic Transparency
+Context: Open-Fin requires a developer-centric UI to visualize the LangGraph agent's thought process and tool execution in real-time.
+Task: Create a mock terminal component in React to display streamed LangGraph events alongside the standard chat UI.
+Steps:
+
+Create a new component at frontend/src/components/AgentTerminal.tsx.
+
+Implement a retro-style terminal window using Tailwind CSS (e.g., bg-gray-900, monospace font, specific text colors for different log levels like green for success, yellow for fetching, red for fallback warnings).
+
+Connect the terminal component to the Server-Sent Events (SSE) stream coming from the FastAPI /chat endpoint.
+
+Parse incoming LangGraph event chunks (tool_start, tool_end, llm_token, error).
+
+Render these events as structured console logs. For example:
+
+> [SYSTEM] Trigger Pipeline initiated for anomaly on $AAPL...
+
+> [AGENT] Routing to Fundamental Research...
+
+> [FMP] Executing fetch_filings(AAPL)... [SUCCESS]
+
+> [WARN] FMP API limit reached. Graceful degradation to yfinance fallback...
+
+Implement auto-scrolling so the terminal always displays the most recent execution step at the bottom of the container.
+Constraints: Ensure the component is performant and does not bottleneck the React render cycle when high-frequency tokens are streamed. Use a ref-based auto-scroll.

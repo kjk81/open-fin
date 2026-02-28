@@ -10,6 +10,27 @@ from pydantic import BaseModel, HttpUrl, model_validator
 T = TypeVar("T")
 
 
+# ---------------------------------------------------------------------------
+# Web search schemas
+# ---------------------------------------------------------------------------
+
+class SearchHit(BaseModel):
+    """A single search result from a web search provider."""
+
+    title: str
+    url: HttpUrl
+    snippet: str
+    score: float | None = None
+
+
+class WebSearchResult(BaseModel):
+    """Normalised output from any web search provider."""
+
+    query: str
+    hits: list[SearchHit]
+    provider: str
+
+
 class SourceRef(BaseModel):
     """Provenance record for a single fetched resource."""
 

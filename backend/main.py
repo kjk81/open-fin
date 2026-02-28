@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from database import SessionLocal, engine
 from models import Base, KGNode
 from routers.portfolio import sync_alpaca_portfolio
-from routers import chat, graph, loadouts, llm, portfolio, ticker, trade, watchlist
+from routers import alerts, chat, graph, loadouts, llm, portfolio, ticker, trade, watchlist
 from agent.llm import ensure_default_settings
 
 logging.basicConfig(
@@ -126,11 +126,24 @@ async def lifespan(app: FastAPI):
     writer_task = asyncio.create_task(faiss_writer_loop())
     logger.info("FAISS writer task started.")
 
+    # --- Start anomaly worker task -----------------------------------
+    from tools.anomaly_worker import anomaly_worker_loop
+
+    anomaly_task = asyncio.create_task(anomaly_worker_loop())
+    logger.info("Anomaly worker task started.")
+
     yield  # ← App runs here
 
     # ------------------------------------------------------------------ #
     # Shutdown                                                             #
     # ------------------------------------------------------------------ #
+    logger.info("Shutting down anomaly worker...")
+    anomaly_task.cancel()
+    try:
+        await asyncio.wait_for(anomaly_task, timeout=5.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+
     logger.info("Shutting down FAISS writer...")
     try:
         await asyncio.wait_for(
@@ -165,6 +178,7 @@ app.include_router(llm.router, prefix="/api")
 app.include_router(watchlist.router, prefix="/api")
 app.include_router(graph.router, prefix="/api")
 app.include_router(loadouts.router, prefix="/api")
+app.include_router(alerts.router, prefix="/api")
 
 
 @app.get("/api/health")

@@ -40,6 +40,10 @@ _DEEP_DIVE_KEYWORDS = frozenset({
     "analysis", "deep-dive", "deep dive", "research", "fundamentals",
     "analyze", "breakdown", "outlook", "report", "evaluate",
 })
+_SCREENING_KEYWORDS = frozenset({
+    "screen", "screener", "filter stocks", "find stocks", "undervalued",
+    "high cash flow", "low pe", "value stocks", "stock screen",
+})
 _PORTFOLIO_KEYWORDS = frozenset({
     "portfolio", "holdings", "positions", "my stocks", "my holdings", "my shares",
 })
@@ -59,7 +63,9 @@ async def intent_router(state: ChatState) -> dict:
     lower = user_text.lower()
 
     # --- Classify intent ---
-    if any(kw in lower for kw in _TRADE_KEYWORDS):
+    if any(kw in lower for kw in _SCREENING_KEYWORDS):
+        intent = "stock_screening"
+    elif any(kw in lower for kw in _TRADE_KEYWORDS):
         intent = "trade_recommendation"
     elif any(kw in lower for kw in _DEEP_DIVE_KEYWORDS):
         intent = "ticker_deep_dive"
@@ -276,6 +282,83 @@ def _fmt_large(n) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Node 3b: ScreeningNode
+# ---------------------------------------------------------------------------
+async def screening_node(state: ChatState) -> dict:
+    """Parse screening criteria from the user message, run the FMP screener,
+    and cross-reference each hit with yfinance technicals."""
+    from tools.finance import get_technical_snapshot, screen_stocks
+
+    user_text = ""
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, HumanMessage):
+            user_text = msg.content
+            break
+
+    # --- LLM-assisted extraction of screening criteria ---
+    llm = get_llm()
+    extraction_prompt = (
+        "Extract stock screening criteria from the user message below. "
+        "Return ONLY a JSON object with FMP screener parameters. "
+        "Common keys: marketCapMoreThan, marketCapLowerThan, peRatioMoreThan, "
+        "peRatioLowerThan, priceMoreThan, priceLowerThan, sector, country, "
+        "betaMoreThan, betaLowerThan, dividendMoreThan. "
+        "Default country to 'US' if not specified. "
+        "Return {} if no screening criteria can be extracted.\n\n"
+        f"User message: {user_text}"
+    )
+    import json
+    try:
+        response = await llm.ainvoke([HumanMessage(content=extraction_prompt)])
+        content = response.content.strip()
+        # Strip markdown code fences if present
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        criteria = json.loads(content)
+    except Exception as exc:
+        logger.warning("screening_node: criteria extraction failed: %s", exc)
+        criteria = {}
+
+    if not criteria:
+        return {
+            "screening_results": {
+                "criteria_description": user_text,
+                "hits": [],
+                "error": "Could not extract screening criteria from the message.",
+            },
+        }
+
+    # --- Run the FMP screener ---
+    screen_result = await screen_stocks(criteria, limit=20)
+
+    hits_data = []
+    cross_ref: dict[str, dict] = {}
+
+    if screen_result.success and screen_result.data:
+        hits_data = [h.model_dump() for h in screen_result.data]
+
+        # --- Cross-reference top hits with yfinance technicals ---
+        for hit in screen_result.data[:10]:  # Limit to 10 to avoid excessive API calls
+            try:
+                tech_result = await get_technical_snapshot(hit.symbol)
+                if tech_result.success and tech_result.data:
+                    cross_ref[hit.symbol] = tech_result.data.model_dump()
+            except Exception as exc:
+                logger.warning("screening_node: technical snapshot failed for %s: %s", hit.symbol, exc)
+
+    screening_results = {
+        "criteria_description": str(criteria),
+        "hits": hits_data,
+        "cross_ref_technicals": cross_ref,
+    }
+    if screen_result.error:
+        screening_results["error"] = screen_result.error
+
+    logger.info("ScreeningNode: %d hits for criteria %s", len(hits_data), criteria)
+    return {"screening_results": screening_results}
+
+
+# ---------------------------------------------------------------------------
 # Node 4: GenerationNode
 # ---------------------------------------------------------------------------
 async def generation_node(state: ChatState) -> dict:
@@ -308,6 +391,40 @@ async def generation_node(state: ChatState) -> dict:
         for sym, report in ticker_reports.items():
             report_lines.append(f"\n[{sym}]\n{report}")
         system_parts.append("".join(report_lines))
+
+    # --- Screening results injection ---
+    screening_results = state.get("screening_results", {})
+    if screening_results:
+        hits = screening_results.get("hits", [])
+        criteria_desc = screening_results.get("criteria_description", "")
+        screen_lines = [f"\n\nSTOCK SCREENING RESULTS (criteria: {criteria_desc}):"]
+        for h in hits[:20]:
+            symbol = h.get("symbol", "")
+            name = h.get("name", "")
+            pe = h.get("pe_ratio")
+            mc = h.get("market_cap")
+            sector = h.get("sector", "")
+            screen_lines.append(
+                f"  {symbol} ({name}) — PE: {pe}, Mkt Cap: {_fmt_large(mc) if mc else 'N/A'}, Sector: {sector}"
+            )
+        cross_ref = screening_results.get("cross_ref_technicals", {})
+        if cross_ref:
+            screen_lines.append("\nTechnical cross-reference for top hits:")
+            for sym, tech in cross_ref.items():
+                price = tech.get("price", 0)
+                rsi = tech.get("rsi_14")
+                sma50 = tech.get("sma_50")
+                screen_lines.append(
+                    f"  {sym}: price=${price:.2f}, RSI(14)={rsi}, SMA(50)={sma50}"
+                )
+        if screening_results.get("error"):
+            screen_lines.append(f"\nNote: {screening_results['error']}")
+        system_parts.append("\n".join(screen_lines))
+
+    # --- Anomaly context injection ---
+    anomaly_context = state.get("anomaly_context", "")
+    if anomaly_context:
+        system_parts.append(f"\n\nANOMALY ALERT CONTEXT:\n{anomaly_context}")
 
     if intent == "trade_recommendation":
         system_parts.append(
