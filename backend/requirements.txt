@@ -14,3 +14,4 @@ apscheduler>=3.10
 faiss-cpu>=1.7.4
 filelock>=3.13
 fastembed>=0.3.0
+httpx>=0.27

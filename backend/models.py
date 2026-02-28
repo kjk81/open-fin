@@ -120,3 +120,28 @@ class KGEdge(Base):
     )
     relationship: Mapped[str] = mapped_column(String(30), index=True)  # "IN_SECTOR" | "IN_INDUSTRY" | "CO_MENTION"
     weight: Mapped[float] = mapped_column(Float, default=1.0)
+
+
+class HttpCache(Base):
+    """HTTP response cache; keyed by URL.  TTL is advisory — callers must check
+    ``fetched_at + ttl_seconds`` before trusting a cached entry."""
+
+    __tablename__ = "http_cache"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    url: Mapped[str] = mapped_column(Text, unique=True, index=True)
+    response_text: Mapped[str] = mapped_column(Text)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    ttl_seconds: Mapped[int] = mapped_column(Integer, default=3600)
+
+
+class Source(Base):
+    """Provenance record written by agent tools when they fetch external data."""
+
+    __tablename__ = "sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    url: Mapped[str] = mapped_column(Text, index=True)
+    title: Mapped[str] = mapped_column(String(500))
+    tool: Mapped[str] = mapped_column(String(100), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
