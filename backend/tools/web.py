@@ -20,6 +20,7 @@ from datetime import timedelta
 from bs4 import BeautifulSoup
 
 from clients.http_base import HttpClient, HttpClientError
+from clients.url_guard import validate_url
 from database import SessionLocal
 from models import HttpCache
 from schemas.kg_entities import WebDocument
@@ -30,12 +31,11 @@ from schemas.tool_contracts import (
     ToolTiming,
     WebSearchResult,
 )
-from tools._utils import html_to_markdown, now_utc
+from tools._utils import STRIP_TAGS, html_to_markdown, now_utc
 
 logger = logging.getLogger(__name__)
 
 _FETCH_TTL_SECONDS: int = 900  # 15 minutes
-_STRIP_TAGS: list[str] = ["script", "style", "nav", "footer", "header", "aside"]
 
 
 # ---------------------------------------------------------------------------
@@ -101,12 +101,22 @@ async def web_fetch(
     started_at = now_utc()
 
     try:
+        # 0. SSRF guard -------------------------------------------------------
+        validate_url(url)
+
         # 1. Cache check -------------------------------------------------------
         cached = _cache_get(url)
         if cached is not None:
             logger.debug("web_fetch cache hit: %s", url)
-            content = cached
-            title = _extract_title(content, url)
+            # Apply extraction on cached HTML (was previously returning raw HTML)
+            if extract_mode == "text":
+                soup = BeautifulSoup(cached, "html.parser")
+                for tag in soup(STRIP_TAGS):
+                    tag.decompose()
+                content = soup.get_text(separator="\n", strip=True)
+            else:
+                content = html_to_markdown(cached)
+            title = _extract_title(cached, url)
         else:
             # 2. HTTP fetch ----------------------------------------------------
             async with HttpClient(timeout=30.0) as client:
@@ -116,7 +126,7 @@ async def web_fetch(
             # 3. Extract -------------------------------------------------------
             if extract_mode == "text":
                 soup = BeautifulSoup(raw_html, "html.parser")
-                for tag in soup(_STRIP_TAGS):
+                for tag in soup(STRIP_TAGS):
                     tag.decompose()
                 content = soup.get_text(separator="\n", strip=True)
             else:
@@ -256,7 +266,7 @@ async def _search_tavily(query: str, max_results: int) -> list[SearchHit]:
     # TavilyClient.search is synchronous — run in executor to keep async path clean
     import asyncio
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     client = TavilyClient(api_key=api_key)
     response = await loop.run_in_executor(
         None,
@@ -289,7 +299,7 @@ async def _search_exa(query: str, max_results: int) -> list[SearchHit]:
 
     import asyncio
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     exa = Exa(api_key=api_key)
     response = await loop.run_in_executor(
         None,

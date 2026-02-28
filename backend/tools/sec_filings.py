@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from agent.llm import get_llm
 from clients.edgar import EdgarClient
 from clients.http_base import HttpClient
+from clients.url_guard import validate_url_no_resolve
 from schemas.finance import FilingExtract, FilingPlan, FilingSection, FilingsResult
 from schemas.tool_contracts import SourceRef, ToolResult
 from tools._utils import build_timing, html_to_markdown, now_utc
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _SEC_USER_AGENT = "OpenFin/1.0 (financial-ai-copilot; contact@openfin.local)"
 _DEFAULT_SECTION_CHARS = 8_000
+_MAX_SECTION_CHARS = 50_000  # hard cap to prevent abuse
 
 _SECTION_PATTERNS: dict[str, str] = {
     "risk factors": r"(?:item\s*1a\b|risk\s+factors)",
@@ -198,6 +200,17 @@ async def extract_filing_sections(
     """Fetch a filing document and return requested sections as truncated markdown."""
     if not sections:
         return []
+
+    # Cap max_chars to prevent abuse
+    max_chars_per_section = min(max_chars_per_section, _MAX_SECTION_CHARS)
+
+    # Validate the filing URL domain (allow only sec.gov)
+    validate_url_no_resolve(filing_url)
+    if not any(d in filing_url for d in ("sec.gov", "SEC.gov")):
+        return [
+            FilingSection(section_name=s, content_md="Filing URL must be a sec.gov domain.", char_count=39)
+            for s in sections
+        ]
 
     async with HttpClient(timeout=45.0, user_agent=_SEC_USER_AGENT) as http:
         index_response = await http.get(filing_url)

@@ -49,10 +49,25 @@ _CO_MENTION_STOPWORDS: frozenset[str] = frozenset(
         # Finance / report boilerplate
         "P", "E", "PE", "EPS", "TTM", "YOY", "QOQ", "FCF",
         "EBIT", "EBITDA", "ROI", "ROE", "ROA", "USD", "ETF",
-        # Generic English
-        "A", "I", "AN", "THE", "AND", "OR", "TO", "IN", "OF", "ON", "IS",
+        # Common English words that match [A-Z]{1,5}
+        "A", "I", "AN", "AM", "IS", "BE", "DO", "GO",
+        "IT", "NO", "OK", "OR", "SO", "US", "TO", "IN",
+        "ON", "AT", "BY", "MY", "ME", "HE", "WE", "IF",
+        "UP", "AS", "OF", "PM", "TV", "AI",
+        "HR", "PR", "UK", "EU", "FY", "QE",
+        "MOM", "IPO", "CEO", "CFO", "CTO", "COO", "CMO",
+        "SEC", "IRS", "FED", "GDP", "CPI", "PPI", "NFP",
+        "THE", "AND", "FOR", "ARE", "BUT", "NOT", "YOU",
+        "ALL", "CAN", "HER", "WAS", "ONE", "OUR", "OUT",
+        "DAY", "GET", "HAS", "HIM", "HIS", "HOW", "ITS",
+        "MAY", "NEW", "NOW", "OLD", "OWN", "SAY", "SHE",
+        "TWO", "WAY", "WHO", "DID", "INC", "LTD", "LLC",
     }
 )
+
+# Prefer $-prefixed tickers; fall back to bare uppercase if none found.
+_DOLLAR_TICKER_RE = re.compile(r"\$([A-Z]{1,5})\b")
+_BARE_TICKER_RE = re.compile(r"\b([A-Z]{1,5})\b")
 
 # ---------------------------------------------------------------------------
 # Module-level singletons (set during FastAPI lifespan startup)
@@ -644,7 +659,15 @@ async def upsert_from_tool_results(
 
     async with AsyncSessionLocal() as session:
         for tr in tool_results:
-            tool_name = tr.get("tool", "")
+            # Type narrowing: skip malformed entries
+            if not isinstance(tr, dict):
+                logger.debug("Skipping non-dict tool_results entry: %r", type(tr))
+                continue
+            tool_name = tr.get("tool")
+            if not isinstance(tool_name, str) or not tool_name:
+                logger.debug("Skipping tool_results entry with invalid tool name.")
+                continue
+
             args: dict = tr.get("args") or {}
             result_str: str = tr.get("result") or ""
 
@@ -797,19 +820,23 @@ def upsert_ticker_snapshot(
 
         # --- Co-mention edges ---
         if report_text:
-            candidates = set(re.findall(r"\b[A-Z]{1,10}\b", report_text))
+            # Prefer $-prefixed tickers; fall back to bare uppercase if none found
+            dollar_tickers = set(_DOLLAR_TICKER_RE.findall(report_text))
+            if dollar_tickers:
+                candidates = dollar_tickers
+            else:
+                candidates = set(_BARE_TICKER_RE.findall(report_text))
             candidates.discard(symbol)
             for other in sorted(candidates):
                 if other in _CO_MENTION_STOPWORDS:
                     continue
-                if 1 <= len(other) <= 10:
-                    other_id = _upsert_node(db, "ticker", other)
-                    _upsert_edge(db, ticker_id, other_id, "CO_MENTION")
-                    new_node_ids.append(other_id)
-                    if _faiss_mgr is not None:
-                        new_node_texts.append(_faiss_mgr.text_for_node("ticker", other))
-                    else:
-                        new_node_texts.append(other)
+                other_id = _upsert_node(db, "ticker", other)
+                _upsert_edge(db, ticker_id, other_id, "CO_MENTION")
+                new_node_ids.append(other_id)
+                if _faiss_mgr is not None:
+                    new_node_texts.append(_faiss_mgr.text_for_node("ticker", other))
+                else:
+                    new_node_texts.append(other)
 
         db.commit()
         logger.debug("KG upsert committed for %s (%d nodes).", symbol, len(new_node_ids))

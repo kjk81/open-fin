@@ -62,6 +62,9 @@ _IVF_MIN_VECTORS = 100
 # Number of Voronoi cells; min(16, n//4) used at training time
 _IVF_NLIST = 16
 
+# Maximum vectors per single upsert call (bounds peak memory)
+_UPSERT_BATCH_SIZE = 500
+
 # Soft-delete fraction that triggers a full index rebuild
 _REBUILD_THRESHOLD = 0.10
 
@@ -180,6 +183,11 @@ class FaissManager:
                     self._index.ntotal,
                 )
                 return
+            except FileNotFoundError:
+                # Race: file disappeared between exists() and read_index()
+                logger.info(
+                    "FAISS index file vanished before read — rebuilding from DB."
+                )
             except Exception as exc:
                 logger.warning(
                     "Failed to load FAISS index (%s), rebuilding from DB.", exc
@@ -208,6 +216,8 @@ class FaissManager:
         - Manually via the ``("rebuild", …)`` writer-queue message.
 
         The filelock is held for the duration of the write.
+        Embeddings are computed in batches of :data:`_UPSERT_BATCH_SIZE` to
+        bound memory usage.
         """
         from models import KGNode  # local import to avoid circular deps
 
@@ -225,7 +235,12 @@ class FaissManager:
             self.text_for_node(r.node_type, r.name, json.loads(r.metadata_json or "{}"))
             for r in rows
         ]
-        vecs = self.embed(texts)
+
+        # Embed in batches to bound memory
+        vec_parts: list[np.ndarray] = []
+        for i in range(0, len(texts), _UPSERT_BATCH_SIZE):
+            vec_parts.append(self.embed(texts[i : i + _UPSERT_BATCH_SIZE]))
+        vecs = np.concatenate(vec_parts) if len(vec_parts) > 1 else vec_parts[0]
 
         inner = self._build_inner_index(vecs)
         index = faiss.IndexIDMap(inner)
@@ -298,16 +313,21 @@ class FaissManager:
 
         This method is intended to be called *exclusively* from the single
         asyncio writer task in ``main.py`` to enforce serial writes.
+
+        Large batches are split into chunks of :data:`_UPSERT_BATCH_SIZE` to
+        bound peak memory usage.
         """
         if not node_ids:
             return
 
-        vecs = self.embed(texts)
-        ids = np.array(node_ids, dtype=np.int64)
-
         with self._file_lock:
             assert self._index is not None
-            self._index.add_with_ids(vecs, ids)
+            for i in range(0, len(node_ids), _UPSERT_BATCH_SIZE):
+                batch_ids = node_ids[i : i + _UPSERT_BATCH_SIZE]
+                batch_texts = texts[i : i + _UPSERT_BATCH_SIZE]
+                vecs = self.embed(batch_texts)
+                ids = np.array(batch_ids, dtype=np.int64)
+                self._index.add_with_ids(vecs, ids)
             faiss.write_index(self._index, str(_index_path()))
 
         logger.debug("FAISS upsert: %d vectors written.", len(node_ids))

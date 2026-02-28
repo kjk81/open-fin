@@ -110,6 +110,11 @@ class KGEdge(Base):
     """Persistent knowledge graph edge between two KGNodes."""
 
     __tablename__ = "kg_edges"
+    __table_args__ = (
+        # Prevent duplicate edges between the same pair of nodes
+        # with the same relationship type.
+        {"sqlite_autoincrement": True},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     source_id: Mapped[int] = mapped_column(

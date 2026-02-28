@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
     faiss_mgr = FaissManager()
     db = SessionLocal()
     try:
-        faiss_mgr.load_or_build(db)
+        await asyncio.to_thread(faiss_mgr.load_or_build, db)
     finally:
         db.close()
 
@@ -96,19 +96,22 @@ async def lifespan(app: FastAPI):
 
                     # Periodically check soft-delete ratio
                     if upsert_count % 50 == 0:
-                        _db = SessionLocal()
-                        try:
-                            total = _db.scalar(
-                                select(func.count()).select_from(KGNode)
-                            ) or 0
-                            deleted = _db.scalar(
-                                select(func.count())
-                                .select_from(KGNode)
-                                .where(KGNode.is_deleted == True)
-                            ) or 0
-                            faiss_mgr.maybe_rebuild(_db, deleted, total)
-                        finally:
-                            _db.close()
+                        def _check_rebuild() -> None:
+                            _db = SessionLocal()
+                            try:
+                                total = _db.scalar(
+                                    select(func.count()).select_from(KGNode)
+                                ) or 0
+                                deleted = _db.scalar(
+                                    select(func.count())
+                                    .select_from(KGNode)
+                                    .where(KGNode.is_deleted == True)
+                                ) or 0
+                                faiss_mgr.maybe_rebuild(_db, deleted, total)
+                            finally:
+                                _db.close()
+
+                        await asyncio.to_thread(_check_rebuild)
 
                 elif op == "rebuild":
                     _db = SessionLocal()
@@ -166,8 +169,8 @@ app.add_middleware(
         "app://.",               # Electron production
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
 app.include_router(portfolio.router, prefix="/api")

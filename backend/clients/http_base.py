@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 
+from clients.url_guard import SSRFBlockedError, validate_url  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 # Status codes that warrant a retry with backoff.
@@ -138,6 +140,10 @@ class HttpClient:
         data: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
+        # SSRF guard: validate absolute URLs (paths relative to base_url are trusted)
+        if path.startswith("http://") or path.startswith("https://"):
+            validate_url(path)
+
         attempt = 0
         last_exc: Exception | None = None
 

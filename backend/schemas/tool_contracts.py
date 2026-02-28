@@ -50,8 +50,18 @@ class ToolTiming(BaseModel):
     @model_validator(mode="after")
     def _compute_duration(self) -> "ToolTiming":
         delta = (self.ended_at - self.started_at).total_seconds() * 1000
+        if delta < 0:
+            raise ValueError(
+                f"ended_at ({self.ended_at}) is before started_at ({self.started_at})"
+            )
         self.duration_ms = round(delta, 3)
         return self
+
+    def __repr__(self) -> str:
+        return (
+            f"ToolTiming(tool={self.tool_name!r}, "
+            f"duration_ms={self.duration_ms})"
+        )
 
 
 class ToolResult(BaseModel, Generic[T]):
@@ -62,3 +72,10 @@ class ToolResult(BaseModel, Generic[T]):
     timing: ToolTiming
     success: bool = True
     error: str | None = None
+
+    def __repr__(self) -> str:
+        return (
+            f"ToolResult(success={self.success}, "
+            f"tool={self.timing.tool_name!r}, "
+            f"error={self.error!r})"
+        )

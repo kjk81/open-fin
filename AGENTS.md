@@ -32,9 +32,14 @@ Open-Fin is a local-first financial co-pilot merging real-time market data with 
 
 1. **Hybrid Intelligence**: Combines deterministic data (prices) with probabilistic AI (sentiment).
 2. **Knowledge Graph**: SQLite (`kg_nodes`, `kg_edges`) + FAISS index.
-   - **Soft Deletes**: Nodes are marked `is_deleted=True`. Index rebuilt periodically.
-   - **Concurrency**: Single-writer asyncio task in `main.py` manages FAISS writes.
-3. **Agent Workflow**: User Query -> LangGraph -> Tools -> Response.
+   - **Soft Deletes**: Nodes are marked `is_deleted=True`. Index rebuilt when >10 % deleted.
+   - **Concurrency**: Single-writer asyncio task in `main.py` manages FAISS writes. Embeds batched at 500 vectors max. FAISS startup runs in `asyncio.to_thread` to avoid blocking.
+3. **Agent Workflow**: User Query → LangGraph → Tools → SSE Response (120 s timeout).
+4. **Security**:
+   - `session_id` requires UUID4 format. `context_refs` validated against allow-list + ticker regex.
+   - CORS restricted to `GET`/`POST`/`OPTIONS` with explicit allowed headers.
+   - Co-mention regex requires `$`-prefix (e.g. `$AAPL`); falls back to bare uppercase with extended stopword list.
+   - SSRF mitigated via `backend/clients/url_guard.py` (IP-blocklist); imported by `http_base.py` and `sec_filings.py`.
 
 ## Development Standards
 

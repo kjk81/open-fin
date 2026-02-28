@@ -77,7 +77,7 @@ def _fmp_source(symbol: str) -> SourceRef:
 
 async def _run_sync(fn, *args):
     """Run a blocking function in the default thread-pool executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, fn, *args)
 
 
@@ -846,8 +846,22 @@ async def screen_stocks(
 
     from clients.fmp import FmpClient, FMPUnavailableError
 
+    # Allowlist of safe FMP screener parameters to prevent query injection
+    _SCREEN_ALLOWLIST = {
+        "marketCapMoreThan", "marketCapLowerThan",
+        "priceMoreThan", "priceLowerThan",
+        "betaMoreThan", "betaLowerThan",
+        "volumeMoreThan", "volumeLowerThan",
+        "dividendMoreThan", "dividendLowerThan",
+        "isEtf", "isActivelyTrading",
+        "sector", "industry", "country", "exchange",
+        "peRatioMoreThan", "peRatioLowerThan",
+    }
+
     try:
-        params: dict[str, Any] = dict(criteria)
+        params: dict[str, Any] = {
+            k: v for k, v in criteria.items() if k in _SCREEN_ALLOWLIST
+        }
         params["limit"] = limit
 
         async with FmpClient() as fmp:

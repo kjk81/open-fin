@@ -46,6 +46,7 @@ class EdgarClient:
 
     # Class-level cache so all instances share the ticker map after first load
     _ticker_map: dict[str, str] | None = None  # {symbol_upper: zero_padded_cik}
+    _ticker_map_lock: asyncio.Lock = asyncio.Lock()  # serialise first-fetch
 
     def __init__(self) -> None:
         # Semaphore keeps concurrent requests below the SEC's 10 req/sec limit
@@ -83,9 +84,14 @@ class EdgarClient:
         if EdgarClient._ticker_map is not None:
             return EdgarClient._ticker_map
 
-        async with self._semaphore:
-            resp = await self._sec_http.get(_COMPANY_TICKERS_PATH)
-        raw: dict = resp.json()
+        async with EdgarClient._ticker_map_lock:
+            # Double-check after acquiring lock (another coroutine may have populated it)
+            if EdgarClient._ticker_map is not None:
+                return EdgarClient._ticker_map
+
+            async with self._semaphore:
+                resp = await self._sec_http.get(_COMPANY_TICKERS_PATH)
+            raw: dict = resp.json()
 
         # SEC format: {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "..."}, ...}
         mapping: dict[str, str] = {}

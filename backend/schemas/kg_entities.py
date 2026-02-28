@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, HttpUrl
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from models import KGNode
 
@@ -55,7 +59,11 @@ class Company(BaseModel):
 
     @classmethod
     def from_kg_node(cls, node: "KGNode") -> "Company":
-        data = json.loads(node.metadata_json or "{}")
+        try:
+            data = json.loads(node.metadata_json or "{}")
+        except json.JSONDecodeError as exc:
+            _logger.warning("Corrupt metadata_json on KGNode %s: %s", node.name, exc)
+            data = {}
         return cls(**data)
 
     def embedding_text(self) -> str:
@@ -81,7 +89,11 @@ class Security(BaseModel):
 
     @classmethod
     def from_kg_node(cls, node: "KGNode") -> "Security":
-        data = json.loads(node.metadata_json or "{}")
+        try:
+            data = json.loads(node.metadata_json or "{}")
+        except json.JSONDecodeError as exc:
+            _logger.warning("Corrupt metadata_json on KGNode %s: %s", node.name, exc)
+            data = {}
         return cls(**data)
 
     def embedding_text(self) -> str:
@@ -111,7 +123,11 @@ class FilingMetadata(BaseModel):
 
     @classmethod
     def from_kg_node(cls, node: "KGNode") -> "FilingMetadata":
-        data = json.loads(node.metadata_json or "{}")
+        try:
+            data = json.loads(node.metadata_json or "{}")
+        except json.JSONDecodeError as exc:
+            _logger.warning("Corrupt metadata_json on KGNode %s: %s", node.name, exc)
+            data = {}
         return cls(**data)
 
     def embedding_text(self) -> str:
@@ -140,7 +156,11 @@ class WebDocument(BaseModel):
 
     @classmethod
     def from_kg_node(cls, node: "KGNode") -> "WebDocument":
-        data = json.loads(node.metadata_json or "{}")
+        try:
+            data = json.loads(node.metadata_json or "{}")
+        except json.JSONDecodeError as exc:
+            _logger.warning("Corrupt metadata_json on KGNode %s: %s", node.name, exc)
+            data = {}
         return cls(**data)
 
     def embedding_text(self) -> str:
@@ -169,7 +189,11 @@ class MetricObservation(BaseModel):
 
     @classmethod
     def from_kg_node(cls, node: "KGNode") -> "MetricObservation":
-        data = json.loads(node.metadata_json or "{}")
+        try:
+            data = json.loads(node.metadata_json or "{}")
+        except json.JSONDecodeError as exc:
+            _logger.warning("Corrupt metadata_json on KGNode %s: %s", node.name, exc)
+            data = {}
         return cls(**data)
 
     def embedding_text(self) -> str:
