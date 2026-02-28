@@ -6,8 +6,8 @@ Open-Fin is a local-first financial co-pilot merging real-time market data with 
 
 ### Frontend (Electron + React)
 - **Stack**: React 18, TypeScript, Vite, Electron.
-- **State**: React Context (`AppContext.tsx`).
-- **Styling**: Standard CSS with CSS variables (`src/index.css`). No Tailwind.
+- **State**: React Context (`frontend/src/context/AppContext.tsx`).
+- **Styling**: Standard CSS with CSS variables (`frontend/src/index.css`). No Tailwind.
 - **Visualization**: `@react-sigma/core` (Graphs), `@tanstack/react-table` (Data).
 - **Entry**: `frontend/electron/main.ts` (Main), `frontend/src/main.tsx` (Renderer).
 
@@ -38,7 +38,7 @@ Open-Fin is a local-first financial co-pilot merging real-time market data with 
 4. **Security**:
    - `session_id` requires UUID4 format. `context_refs` validated against allow-list + ticker regex.
    - CORS restricted to `GET`/`POST`/`OPTIONS` with explicit allowed headers.
-   - Co-mention regex requires `$`-prefix (e.g. `$AAPL`); falls back to bare uppercase with extended stopword list.
+   - Co-mention extraction prefers `$`-prefixed tickers (e.g. `$AAPL`); falls back to bare uppercase with extended stopword list.
    - SSRF mitigated via `backend/clients/url_guard.py` (IP-blocklist); imported by `http_base.py` and `sec_filings.py`.
 
 ## Development Standards
@@ -53,5 +53,5 @@ Open-Fin is a local-first financial co-pilot merging real-time market data with 
 1. **Context**: Review `backend/agent/graph.py` for decision flow.
 2. **New Tool**: Add to `backend/agent/nodes.py`, register in `graph.py`.
 3. **UI**: Create components in `frontend/src/components/`. Route data via `backend/routers/`.
-4. **Database**: Add columns to `backend/models.py`. Migration via `backend/scripts/migrate_kg_to_sqlite.py` (if KG changes) or manual Alembic.
+4. **Database**: Add columns to `backend/models.py`. Migration via `backend/scripts/migrate_kg_to_sqlite.py` (if KG changes) or manual SQL migration.
 5. **Worker**: Register new strategies in `backend/strategies/__init__.py`.

@@ -22,10 +22,14 @@ from typing import Optional
 import frontmatter
 from pydantic import BaseModel, Field
 
+from pathutil import base_dir
+
 logger = logging.getLogger(__name__)
 
-# Directory that houses the ``.md`` skill files
-SKILLS_DIR = Path(__file__).resolve().parent / "skills"
+# Directory that houses the ``.md`` skill files.
+# Under PyInstaller, ``base_dir()`` returns ``sys._MEIPASS`` (the extraction
+# root) where ``--add-data agent/skills`` placed the files.
+SKILLS_DIR = base_dir() / "agent" / "skills"
 
 
 # ---------------------------------------------------------------------------

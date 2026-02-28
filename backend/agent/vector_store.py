@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -74,10 +75,21 @@ _REBUILD_THRESHOLD = 0.10
 # ---------------------------------------------------------------------------
 
 def _index_dir() -> Path:
-    """Return the directory that holds the FAISS index and lock files."""
+    """Return the directory that holds the FAISS index and lock files.
+
+    Resolution order:
+    1. ``OPEN_FIN_FAISS_DIR`` env var (always preferred — Electron sets this
+       to ``userData/faiss_data`` in packaged mode).
+    2. Frozen build fallback: writable directory next to the executable.
+    3. Source-tree fallback: ``backend/faiss_data``.
+    """
     override = os.getenv("OPEN_FIN_FAISS_DIR")
     if override:
         p = Path(override).expanduser().resolve()
+    elif getattr(sys, "frozen", False):
+        # Frozen executable — sys._MEIPASS is read-only, so fall back to a
+        # writable directory next to the executable itself.
+        p = Path(sys.executable).resolve().parent / "faiss_data"
     else:
         p = Path(__file__).resolve().parent.parent / "faiss_data"
     p.mkdir(parents=True, exist_ok=True)

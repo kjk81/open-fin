@@ -4,14 +4,12 @@ import { createHash } from "crypto";
 import * as path from "path";
 import * as fs from "fs";
 
-function backendDir(): string {
-  // In dev, app.getAppPath() points at frontend/.
-  // In packaged, backend is copied into resources/backend via extraResources.
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, "backend");
-  }
-  return path.join(app.getAppPath(), "..", "backend");
-}
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+const IS_WIN = process.platform === "win32";
+const EXE_EXT = IS_WIN ? ".exe" : "";
 
 function userDataPaths() {
   const base = app.getPath("userData");
@@ -20,22 +18,29 @@ function userDataPaths() {
     dbPath: path.join(base, "open_fin.db"),
     kgPath: path.join(base, "open_fin_kg.json"),
     envPath: path.join(base, ".env"),
+    faissDir: path.join(base, "faiss_data"),
   };
 }
 
-function runtimePaths() {
-  const BACKEND_DIR = backendDir();
-  const { venvDir, dbPath, kgPath, envPath } = userDataPaths();
+/** Shared environment variables passed to both backend and worker processes. */
+function backendEnv(): NodeJS.ProcessEnv {
+  const { dbPath, kgPath, envPath, faissDir } = userDataPaths();
   return {
-    BACKEND_DIR,
-    VENV_DIR: venvDir,
-    DB_PATH: dbPath,
-    KG_PATH: kgPath,
-    ENV_PATH: envPath,
+    ...process.env,
+    OPEN_FIN_DB_PATH: dbPath,
+    OPEN_FIN_KG_PATH: kgPath,
+    OPEN_FIN_ENV_PATH: envPath,
+    OPEN_FIN_FAISS_DIR: faissDir,
   };
 }
 
-const IS_WIN = process.platform === "win32";
+// ---------------------------------------------------------------------------
+// Dev-mode helpers (venv workflow — only used when !app.isPackaged)
+// ---------------------------------------------------------------------------
+
+function devBackendDir(): string {
+  return path.join(app.getAppPath(), "..", "backend");
+}
 
 function venvBinaries(venvDir: string) {
   return {
@@ -44,30 +49,27 @@ function venvBinaries(venvDir: string) {
   };
 }
 
-let backendProcess: ChildProcess | null = null;
-let workerProcess: ChildProcess | null = null;
-let mainWindow: BrowserWindow | null = null;
-
 function sha256File(filePath: string): string {
   const buf = fs.readFileSync(filePath);
   return createHash("sha256").update(buf).digest("hex");
 }
 
 function ensureVenv(): void {
-  const { BACKEND_DIR, VENV_DIR } = runtimePaths();
-  const { pip } = venvBinaries(VENV_DIR);
+  const BACKEND_DIR = devBackendDir();
+  const { venvDir } = userDataPaths();
+  const { pip } = venvBinaries(venvDir);
 
   const requirementsPath = path.join(BACKEND_DIR, "requirements.txt");
-  const markerPath = path.join(VENV_DIR, "requirements.sha256");
+  const markerPath = path.join(venvDir, "requirements.sha256");
 
   if (!fs.existsSync(BACKEND_DIR) || !fs.existsSync(requirementsPath)) {
     throw new Error(`Backend not found at ${BACKEND_DIR}`);
   }
 
-  if (!fs.existsSync(VENV_DIR)) {
-    console.log("[Electron] Creating Python venv at", VENV_DIR);
-    fs.mkdirSync(VENV_DIR, { recursive: true });
-    execSync(`python -m venv "${VENV_DIR}"`, { cwd: BACKEND_DIR, stdio: "inherit" });
+  if (!fs.existsSync(venvDir)) {
+    console.log("[Electron] Creating Python venv at", venvDir);
+    fs.mkdirSync(venvDir, { recursive: true });
+    execSync(`python -m venv "${venvDir}"`, { cwd: BACKEND_DIR, stdio: "inherit" });
   }
 
   const reqHash = sha256File(requirementsPath);
@@ -85,41 +87,83 @@ function ensureVenv(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Packaged-mode helpers (frozen PyInstaller binaries)
+// ---------------------------------------------------------------------------
+
+function frozenApiExe(): string {
+  return path.join(
+    process.resourcesPath,
+    "backend",
+    "api",
+    "open-fin-api",
+    `open-fin-api${EXE_EXT}`,
+  );
+}
+
+function frozenWorkerExe(): string {
+  return path.join(
+    process.resourcesPath,
+    "backend",
+    "worker",
+    "open-fin-worker",
+    `open-fin-worker${EXE_EXT}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Process management
+// ---------------------------------------------------------------------------
+
+let backendProcess: ChildProcess | null = null;
+let workerProcess: ChildProcess | null = null;
+let mainWindow: BrowserWindow | null = null;
+
+function pipeOutput(child: ChildProcess, label: string): void {
+  child.stdout?.on("data", (data: Buffer) => {
+    process.stdout.write(`[${label}] ${data}`);
+  });
+  child.stderr?.on("data", (data: Buffer) => {
+    process.stderr.write(`[${label}] ${data}`);
+  });
+}
+
 function startBackend(): void {
   if (backendProcess) return;
 
-  const { BACKEND_DIR, VENV_DIR, DB_PATH, KG_PATH, ENV_PATH } = runtimePaths();
-  const { python } = venvBinaries(VENV_DIR);
+  const env = backendEnv();
 
-  try {
-    ensureVenv();
-  } catch (err) {
-    console.error("[Electron] Failed to prepare backend:", err);
-    return;
+  if (app.isPackaged) {
+    // ---- Packaged mode: spawn the frozen PyInstaller binary ----
+    const exe = frozenApiExe();
+    if (!fs.existsSync(exe)) {
+      console.error(`[Electron] Frozen API binary not found: ${exe}`);
+      return;
+    }
+    console.log("[Electron] Starting frozen API server...");
+    backendProcess = spawn(exe, [], { stdio: "pipe", env });
+  } else {
+    // ---- Dev mode: use Python venv + uvicorn ----
+    const BACKEND_DIR = devBackendDir();
+    const { venvDir } = userDataPaths();
+    const { python } = venvBinaries(venvDir);
+
+    try {
+      ensureVenv();
+    } catch (err) {
+      console.error("[Electron] Failed to prepare backend:", err);
+      return;
+    }
+
+    console.log("[Electron] Starting uvicorn (dev)...");
+    backendProcess = spawn(
+      python,
+      ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"],
+      { cwd: BACKEND_DIR, stdio: "pipe", env },
+    );
   }
 
-  console.log("[Electron] Starting uvicorn...");
-  backendProcess = spawn(
-    python,
-    ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"],
-    {
-      cwd: BACKEND_DIR,
-      stdio: "pipe",
-      env: {
-        ...process.env,
-        OPEN_FIN_DB_PATH: DB_PATH,
-        OPEN_FIN_KG_PATH: KG_PATH,
-        OPEN_FIN_ENV_PATH: ENV_PATH,
-      },
-    },
-  );
-
-  backendProcess.stdout?.on("data", (data: Buffer) => {
-    process.stdout.write(`[backend] ${data}`);
-  });
-  backendProcess.stderr?.on("data", (data: Buffer) => {
-    process.stderr.write(`[backend] ${data}`);
-  });
+  pipeOutput(backendProcess, "backend");
 
   backendProcess.on("exit", (code) => {
     console.log(`[Electron] Backend exited with code ${code}`);
@@ -134,31 +178,32 @@ function startBackend(): void {
 function startWorker(): void {
   if (workerProcess) return;
 
-  const { BACKEND_DIR, VENV_DIR, DB_PATH, KG_PATH, ENV_PATH } = runtimePaths();
-  const { python } = venvBinaries(VENV_DIR);
+  const env = backendEnv();
 
-  console.log("[Electron] Starting worker...");
-  workerProcess = spawn(
-    python,
-    ["worker.py"],
-    {
-      cwd: BACKEND_DIR,
-      stdio: "pipe",
-      env: {
-        ...process.env,
-        OPEN_FIN_DB_PATH: DB_PATH,
-        OPEN_FIN_KG_PATH: KG_PATH,
-        OPEN_FIN_ENV_PATH: ENV_PATH,
-      },
-    },
-  );
+  if (app.isPackaged) {
+    // ---- Packaged mode: spawn the frozen PyInstaller binary ----
+    const exe = frozenWorkerExe();
+    if (!fs.existsSync(exe)) {
+      console.error(`[Electron] Frozen worker binary not found: ${exe}`);
+      return;
+    }
+    console.log("[Electron] Starting frozen worker...");
+    workerProcess = spawn(exe, [], { stdio: "pipe", env });
+  } else {
+    // ---- Dev mode: use Python venv ----
+    const BACKEND_DIR = devBackendDir();
+    const { venvDir } = userDataPaths();
+    const { python } = venvBinaries(venvDir);
 
-  workerProcess.stdout?.on("data", (data: Buffer) => {
-    process.stdout.write(`[worker] ${data}`);
-  });
-  workerProcess.stderr?.on("data", (data: Buffer) => {
-    process.stderr.write(`[worker] ${data}`);
-  });
+    console.log("[Electron] Starting worker (dev)...");
+    workerProcess = spawn(
+      python,
+      ["worker.py"],
+      { cwd: BACKEND_DIR, stdio: "pipe", env },
+    );
+  }
+
+  pipeOutput(workerProcess, "worker");
 
   workerProcess.on("exit", (code) => {
     console.log(`[Electron] Worker exited with code ${code}`);
@@ -183,6 +228,10 @@ function stopWorker(): void {
     workerProcess = null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Window
+// ---------------------------------------------------------------------------
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -213,7 +262,10 @@ function createWindow(): void {
   });
 }
 
+// ---------------------------------------------------------------------------
 // IPC handlers
+// ---------------------------------------------------------------------------
+
 ipcMain.handle("get-backend-status", () => ({
   running: backendProcess !== null && !backendProcess.killed,
 }));
@@ -227,7 +279,10 @@ ipcMain.handle("stop-backend", () => {
   return { stopped: true };
 });
 
+// ---------------------------------------------------------------------------
 // App lifecycle
+// ---------------------------------------------------------------------------
+
 app.whenReady().then(() => {
   startBackend();
   setTimeout(() => startWorker(), 5000);

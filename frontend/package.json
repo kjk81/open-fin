@@ -10,7 +10,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.node.json",
-    "build": "npm run build:renderer && npm run build:electron && electron-builder",
+    "build:backend": "cd ../backend && python build.py",
+    "build": "npm run build:renderer && npm run build:electron && npm run build:backend && electron-builder",
+    "build:dev": "npm run build:renderer && npm run build:electron && electron-builder",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -49,12 +51,22 @@
     ],
     "extraResources": [
       {
-        "from": "../backend",
-        "to": "backend",
-        "filter": [
-          "**/*"
-        ]
+        "from": "../backend/dist/api",
+        "to": "backend/api"
+      },
+      {
+        "from": "../backend/dist/worker",
+        "to": "backend/worker"
       }
-    ]
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   }
 }
