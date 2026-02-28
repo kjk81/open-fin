@@ -6,7 +6,7 @@ A local, privacy-first desktop application functioning as a quantitative financi
 
 * **Frontend:** Electron, React (Vite), Tailwind CSS.
 * **Backend:** Python, FastAPI, Uvicorn.
-* **Database (Local):** SQLite (for settings, portfolio state, and cached text reports), NetworkX/Neo4j (for the Knowledge Graph relationships).
+* **Database (Local):** SQLite (for settings, portfolio state, and cached text reports), NetworkX (for the Knowledge Graph relationships).
 * **AI/Agent Core:** LangGraph, LangChain, Ollama (or selected cloud API with auto fallback (at least OpenRouter, Gemini, Groq, Hugging Face) for inference).
 * **Data Providers:** Alpaca SDK (paper trading/portfolio sync), `yfinance` (instant historical and fundamental market data).
 * **Graph UI:** `@react-sigma/core`, `@react-sigma/layout-forceatlas2`, `graphology`, `@tanstack/react-table`, `@tanstack/react-virtual`.
