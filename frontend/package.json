@@ -54,7 +54,8 @@
     "extraResources": [
       {
         "from": "../backend/dist/api",
-        "to": "backend/api"
+        "to": "backend/api",
+        "filter": ["**/*", "!**/fastembed_cache/**", "!**/faiss_data/**"]
       },
       {
         "from": "../backend/dist/worker",
