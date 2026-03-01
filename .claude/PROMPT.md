@@ -374,3 +374,18 @@ Render these events as structured console logs. For example:
 
 Implement auto-scrolling so the terminal always displays the most recent execution step at the bottom of the container.
 Constraints: Ensure the component is performant and does not bottleneck the React render cycle when high-frequency tokens are streamed. Use a ref-based auto-scroll.
+
+## Phase 9: Agent/Subagent Model Split
+Context: To optimize cost and reasoning performance, we need to decouple the "Agent" (Router/Finalizer) from the "Subagent" (Tool Executor).
+Task: Refactor the LLM provider settings to support role-based model selection.
+Steps:
+
+Update backend/agent/graph.py to introduce a _get_model(role) helper.
+
+Refactor route_finance_query to explicitly request a model with role="subagent". This node handles complex tool schemas and Skill execution, so it requires a high-reasoning model (e.g., Claude 3.5 Sonnet, GPT-4o).
+
+Refactor finalize_response to explicitly request a model with role="agent". This node handles prose synthesis and formatting, which can often be handled by faster, cheaper models (e.g., Claude 3.5 Haiku, GPT-4o-mini).
+
+Update backend/agent/llm.py (if necessary) to parse environment variables for specific roles (e.g., SUBAGENT_PROVIDER, AGENT_PROVIDER) while maintaining backward compatibility with the global LLM settings.
+
+Constraints: Ensure the Dexter/Skill workflow remains intact. The subagent must still have access to the full suite of FINANCE_TOOLS, including load_skill.

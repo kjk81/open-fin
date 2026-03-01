@@ -412,8 +412,10 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
+    minWidth: 800,
+    minHeight: 600,
     titleBarStyle: "hidden",
-    backgroundColor: "#0f172a",
+    backgroundColor: "#09090b",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -457,6 +459,25 @@ ipcMain.handle("stop-backend", () => {
 });
 
 ipcMain.handle("get-backend-port", () => backendPort);
+
+ipcMain.handle("window-minimize", () => {
+  mainWindow?.minimize();
+});
+
+ipcMain.handle("window-maximize-toggle", () => {
+  if (!mainWindow) return false;
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize();
+    return false;
+  } else {
+    mainWindow.maximize();
+    return true;
+  }
+});
+
+ipcMain.handle("window-close", () => {
+  mainWindow?.close();
+});
 
 // ---------------------------------------------------------------------------
 // App lifecycle

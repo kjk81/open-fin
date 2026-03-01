@@ -165,7 +165,7 @@ async def ticker_lookup_node(state: ChatState) -> dict:
     from database import SessionLocal
     from models import ReportCache
 
-    llm = get_llm()
+    llm = get_llm(role="agent")
     db = SessionLocal()
     ticker_reports: dict[str, str] = {}
     cache_cutoff = datetime.utcnow() - timedelta(days=7)
@@ -303,7 +303,7 @@ async def screening_node(state: ChatState) -> dict:
             break
 
     # --- LLM-assisted extraction of screening criteria ---
-    llm = get_llm()
+    llm = get_llm(role="agent")
     extraction_prompt = (
         "Extract stock screening criteria from the user message below. "
         "Return ONLY a JSON object with FMP screener parameters. "
@@ -516,7 +516,7 @@ async def generation_node(state: ChatState) -> dict:
 
     # --- Streaming LLM call ---
     # Tokens are captured by astream_events("on_chat_model_stream") in the SSE endpoint
-    llm = get_llm()
+    llm = get_llm(role="agent")
     full_response = ""
     async for chunk in llm.astream(history_messages):
         if chunk.content:

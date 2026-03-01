@@ -86,11 +86,21 @@ def validate_provider_order(order: list[str]) -> list[str]:
 
 def settings_payload() -> dict:
     mode, fallback_order = load_llm_settings()
-    return {
+    payload: dict = {
         "mode": mode,
         "providers": list(PROVIDERS),
         "fallback_order": fallback_order,
     }
+    # Report which provider/model each role resolves to (informational)
+    for role in ("agent", "subagent"):
+        order = _effective_order_for_role(mode, fallback_order, role=role)
+        for provider in order:
+            cfg = _provider_config(provider, role=role)
+            if cfg is not None:
+                payload[f"{role}_provider"] = cfg.provider
+                payload[f"{role}_model"] = cfg.model
+                break
+    return payload
 
 
 def persist_settings(mode: str, fallback_order: list[str]) -> dict:
@@ -156,13 +166,31 @@ class _ProviderConfig:
     base_url: str | None = None
 
 
-def _provider_config(provider: str) -> _ProviderConfig | None:
+def _provider_config(provider: str, role: str | None = None) -> _ProviderConfig | None:
+    """Return provider configuration, optionally overriding the model for a role.
+
+    When *role* is ``"agent"`` or ``"subagent"``, the function checks for
+    role-prefixed env vars first (e.g. ``AGENT_OPENROUTER_MODEL``) and falls
+    back to the global var (e.g. ``OPENROUTER_MODEL``).  API keys and base URLs
+    are always shared between roles.
+    """
     provider_name = provider.lower().strip()
+    role_prefix = f"{role.upper()}_" if role else ""
+
+    def _model(role_var: str, global_var: str, default: str) -> str:
+        # Check generic {ROLE}_MODEL first (e.g. AGENT_MODEL / SUBAGENT_MODEL),
+        # then the per-provider role override (e.g. AGENT_OPENROUTER_MODEL),
+        # then the global per-provider var, then the compiled-in default.
+        return (
+            os.getenv(f"{role_prefix}MODEL")
+            or os.getenv(f"{role_prefix}{role_var}")
+            or os.getenv(global_var, default)
+        )
 
     if provider_name == "ollama":
         return _ProviderConfig(
             provider="ollama",
-            model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+            model=_model("OLLAMA_MODEL", "OLLAMA_MODEL", "llama3.1:8b"),
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         )
 
@@ -172,7 +200,7 @@ def _provider_config(provider: str) -> _ProviderConfig | None:
             return None
         return _ProviderConfig(
             provider="openrouter",
-            model=os.getenv("OPENROUTER_MODEL", "mistralai/mistral-7b-instruct"),
+            model=_model("OPENROUTER_MODEL", "OPENROUTER_MODEL", "mistralai/mistral-7b-instruct"),
             api_key=key,
             base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         )
@@ -184,7 +212,7 @@ def _provider_config(provider: str) -> _ProviderConfig | None:
         base_url = os.getenv("OPENAI_BASE_URL") or None
         return _ProviderConfig(
             provider="openai",
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            model=_model("OPENAI_MODEL", "OPENAI_MODEL", "gpt-4o-mini"),
             api_key=key,
             base_url=base_url,
         )
@@ -195,7 +223,7 @@ def _provider_config(provider: str) -> _ProviderConfig | None:
             return None
         return _ProviderConfig(
             provider="groq",
-            model=os.getenv("GROQ_MODEL", "llama3-8b-8192"),
+            model=_model("GROQ_MODEL", "GROQ_MODEL", "llama3-8b-8192"),
             api_key=key,
             base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
         )
@@ -207,7 +235,7 @@ def _provider_config(provider: str) -> _ProviderConfig | None:
             return None
         return _ProviderConfig(
             provider="huggingface",
-            model=os.getenv("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2"),
+            model=_model("HF_MODEL", "HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2"),
             api_key=token,
             base_url=base_url,
         )
@@ -218,17 +246,25 @@ def _provider_config(provider: str) -> _ProviderConfig | None:
             return None
         return _ProviderConfig(
             provider="gemini",
-            model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+            model=_model("GEMINI_MODEL", "GEMINI_MODEL", "gemini-1.5-flash"),
             api_key=key,
         )
 
     return None
 
 
-def _provider_model(provider: str):
-    cfg = _provider_config(provider)
+def _provider_model(provider: str, role: str | None = None):
+    """Instantiate a LangChain chat model for *provider*, optionally for a *role*.
+
+    The ``role`` parameter is forwarded to :func:`_provider_config` to select
+    role-specific model names.  Subagent calls use a lower temperature (0.1)
+    for more deterministic tool-call JSON; all other roles use 0.2.
+    """
+    cfg = _provider_config(provider, role=role)
     if cfg is None:
         return None
+
+    temperature = 0.1 if role == "subagent" else 0.2
 
     if cfg.provider == "ollama":
         try:
@@ -239,8 +275,8 @@ def _provider_model(provider: str):
                 "Install it and try again."
             ) from exc
 
-        logger.info("LLM provider: Ollama (model=%s)", cfg.model)
-        return ChatOllama(model=cfg.model, base_url=cfg.base_url, temperature=0.2)
+        logger.info("LLM provider: Ollama (model=%s role=%s)", cfg.model, role)
+        return ChatOllama(model=cfg.model, base_url=cfg.base_url, temperature=temperature)
 
     if cfg.provider == "gemini":
         try:
@@ -250,11 +286,11 @@ def _provider_model(provider: str):
                 "Gemini provider requires the 'langchain-google-genai' package."
             ) from exc
 
-        logger.info("LLM provider: Gemini (model=%s)", cfg.model)
+        logger.info("LLM provider: Gemini (model=%s role=%s)", cfg.model, role)
         return ChatGoogleGenerativeAI(
             model=cfg.model,
             google_api_key=cfg.api_key,
-            temperature=0.2,
+            temperature=temperature,
         )
 
     # OpenAI-compatible providers
@@ -263,14 +299,14 @@ def _provider_model(provider: str):
     kwargs: dict = {
         "model": cfg.model,
         "api_key": cfg.api_key,
-        "temperature": 0.2,
+        "temperature": temperature,
         "timeout": 45,
     }
     if cfg.base_url:
         kwargs["base_url"] = cfg.base_url
 
     label = cfg.provider.capitalize()
-    logger.info("LLM provider: %s (model=%s)", label, cfg.model)
+    logger.info("LLM provider: %s (model=%s role=%s)", label, cfg.model, role)
     return ChatOpenAI(**kwargs)
 
 
@@ -281,23 +317,54 @@ def _effective_order(mode: str, configured_order: list[str]) -> list[str]:
     return _normalize_order(configured_order)
 
 
+def _effective_order_for_role(
+    mode: str,
+    configured_order: list[str],
+    role: str | None = None,
+) -> list[str]:
+    """Like :func:`_effective_order` but respects ``{ROLE}_PROVIDER`` env overrides.
+
+    If ``AGENT_PROVIDER`` or ``SUBAGENT_PROVIDER`` is set, the fallback order
+    for that role is collapsed to just that single provider.  This allows
+    operators to pin the subagent to a high-reasoning model while the agent
+    uses a cheaper fallback chain, or vice-versa.
+
+    Example ``.env``::
+
+        SUBAGENT_PROVIDER=openrouter
+        AGENT_PROVIDER=groq
+    """
+    if role:
+        forced = os.getenv(f"{role.upper()}_PROVIDER", "").strip().lower()
+        if forced and forced in PROVIDERS:
+            logger.info("Role '%s' forced to provider '%s'", role, forced)
+            return [forced]
+    return _effective_order(mode, configured_order)
+
+
 class FallbackLLM:
-    def __init__(self, mode: str, fallback_order: list[str]) -> None:
+    def __init__(
+        self,
+        mode: str,
+        fallback_order: list[str],
+        role: str | None = None,
+    ) -> None:
         self.mode = (mode or "cloud").lower().strip()
-        self.fallback_order = _effective_order(self.mode, fallback_order)
+        self.role = role
+        self.fallback_order = _effective_order_for_role(self.mode, fallback_order, role=role)
 
     async def ainvoke(self, messages: list[BaseMessage]):
         last_error: Exception | None = None
         for provider in self.fallback_order:
-            model = _provider_model(provider)
+            model = _provider_model(provider, role=self.role)
             if model is None:
                 continue
             try:
-                logger.info("LLM invoke provider=%s", provider)
+                logger.info("LLM invoke provider=%s role=%s", provider, self.role)
                 return await model.ainvoke(messages)
             except Exception as exc:
                 last_error = exc
-                logger.warning("LLM invoke failed provider=%s error=%s", provider, exc)
+                logger.warning("LLM invoke failed provider=%s role=%s error=%s", provider, self.role, exc)
 
         raise RuntimeError(
             "No LLM provider available or all providers failed. "
@@ -309,16 +376,19 @@ class FallbackLLM:
         """Invoke the first healthy provider with structured output enabled."""
         last_error: Exception | None = None
         for provider in self.fallback_order:
-            model = _provider_model(provider)
+            model = _provider_model(provider, role=self.role)
             if model is None:
                 continue
             try:
-                logger.info("LLM structured invoke provider=%s schema=%s", provider, getattr(schema, "__name__", str(schema)))
+                logger.info(
+                    "LLM structured invoke provider=%s role=%s schema=%s",
+                    provider, self.role, getattr(schema, "__name__", str(schema)),
+                )
                 structured_model = model.with_structured_output(schema)
                 return await structured_model.ainvoke(messages)
             except Exception as exc:
                 last_error = exc
-                logger.warning("LLM structured invoke failed provider=%s error=%s", provider, exc)
+                logger.warning("LLM structured invoke failed provider=%s role=%s error=%s", provider, self.role, exc)
 
         raise RuntimeError(
             "No LLM provider available or all providers failed for structured output. "
@@ -328,20 +398,20 @@ class FallbackLLM:
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
         last_error: Exception | None = None
         for provider in self.fallback_order:
-            model = _provider_model(provider)
+            model = _provider_model(provider, role=self.role)
             if model is None:
                 continue
 
             emitted_any = False
             try:
-                logger.info("LLM stream provider=%s", provider)
+                logger.info("LLM stream provider=%s role=%s", provider, self.role)
                 async for chunk in model.astream(messages):
                     emitted_any = True
                     yield chunk
                 return
             except Exception as exc:
                 last_error = exc
-                logger.warning("LLM stream failed provider=%s error=%s", provider, exc)
+                logger.warning("LLM stream failed provider=%s role=%s error=%s", provider, self.role, exc)
                 if emitted_any:
                     raise RuntimeError(
                         f"Streaming interrupted from provider '{provider}'."
@@ -354,6 +424,13 @@ class FallbackLLM:
         ) from last_error
 
 
-def get_llm() -> FallbackLLM:
+def get_llm(role: str | None = None) -> FallbackLLM:
+    """Return a :class:`FallbackLLM` configured for *role*.
+
+    Args:
+        role: ``"agent"`` (prose synthesis, cheap/fast model) or
+              ``"subagent"`` (tool calling, high-reasoning model).
+              ``None`` preserves the original behaviour — global settings only.
+    """
     mode, fallback_order = load_llm_settings()
-    return FallbackLLM(mode=mode, fallback_order=fallback_order)
+    return FallbackLLM(mode=mode, fallback_order=fallback_order, role=role)

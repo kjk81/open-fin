@@ -11,10 +11,12 @@ import { WorkerStatusBadge } from "./components/WorkerStatusBadge";
 import { LoadoutsPanel } from "./components/LoadoutsPanel";
 import { SettingsPage } from "./components/SettingsPage";
 import { SettingsGearButton } from "./components/SettingsGearButton";
+import { TitleBar } from "./components/TitleBar";
 
 export default function App() {
   return (
     <AppProvider>
+      <TitleBar />
       <Layout />
     </AppProvider>
   );
@@ -50,10 +52,7 @@ function Layout() {
     >
       {/* Header — spans all columns */}
       <header className="app-header">
-        <h1 style={{ fontSize: "18px", fontWeight: 700, letterSpacing: "-0.02em" }}>
-          Open-Fin
-        </h1>
-        <nav className="tab-bar">
+        <nav className="tab-bar" style={{ marginLeft: 0 }}>
           <button
             className={`tab${activeTab === "copilot" ? " active" : ""}`}
             onClick={() => setActiveTab("copilot")}

@@ -9,4 +9,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("stop-backend"),
   getBackendPort: (): Promise<number> =>
     ipcRenderer.invoke("get-backend-port"),
+  minimizeWindow: (): Promise<void> =>
+    ipcRenderer.invoke("window-minimize"),
+  toggleMaximizeWindow: (): Promise<boolean> =>
+    ipcRenderer.invoke("window-maximize-toggle"),
+  closeWindow: (): Promise<void> =>
+    ipcRenderer.invoke("window-close"),
 });

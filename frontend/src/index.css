@@ -5,11 +5,12 @@
 }
 
 :root {
-  --bg: #0f172a;
-  --surface: #1e293b;
-  --border: #334155;
-  --text: #e2e8f0;
-  --text-muted: #94a3b8;
+  --bg-app: #09090b;
+  --bg: #18181b;
+  --surface: #27272a;
+  --border: #3f3f46;
+  --text: #f4f4f5;
+  --text-muted: #a1a1aa;
   --accent: #3b82f6;
   --accent-hover: #2563eb;
   --green: #22c55e;
@@ -18,17 +19,21 @@
 }
 
 body {
-  background: var(--bg);
+  background: var(--bg-app);
   color: var(--text);
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.5;
   height: 100vh;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 #root {
   height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ── Animations ────────────────────────────────────────────────────────────── */
@@ -40,6 +45,76 @@ body {
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+
+/* ── Title bar ─────────────────────────────────────────────────────────────── */
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  background: var(--bg-app);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.titlebar-app {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  -webkit-app-region: no-drag;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+}
+
+.titlebar-icon {
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.titlebar-title {
+  color: var(--text-muted);
+}
+
+.titlebar-drag {
+  flex: 1;
+  height: 100%;
+}
+
+.titlebar-controls {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 32px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.titlebar-btn:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.titlebar-btn--close:hover {
+  background: var(--red);
+  color: #fff;
 }
 
 /* ── Tab bar ───────────────────────────────────────────────────────────────── */
@@ -341,7 +416,8 @@ body {
   display: grid;
   grid-template-columns: 260px 1fr 340px;
   grid-template-rows: auto 1fr;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -350,10 +426,9 @@ body {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 10px 20px;
+  padding: 6px 16px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  -webkit-app-region: drag;
+  background: var(--bg);
   user-select: none;
 }
 
@@ -1397,6 +1472,105 @@ body {
   gap: 6px;
   font-size: 13px;
   color: var(--text-muted);
+}
+
+/* Toggle switch (agent/subagent split) */
+.settings-toggle {
+  position: relative;
+  display: inline-block;
+  width: 42px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.settings-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.settings-toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--border);
+  transition: 0.2s;
+  border-radius: 99px;
+}
+
+.settings-toggle-slider:before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 3px;
+  top: 3px;
+  background: var(--text);
+  transition: 0.2s;
+  border-radius: 50%;
+}
+
+.settings-toggle input:checked + .settings-toggle-slider {
+  background: var(--accent);
+}
+
+.settings-toggle input:checked + .settings-toggle-slider:before {
+  transform: translateX(20px);
+}
+
+/* Row wrapper aligning toggle label text + toggle control */
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Model configuration cards */
+.settings-model-cards {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.settings-model-card {
+  flex: 1;
+  min-width: 220px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  transition: border-color 0.15s;
+}
+
+.settings-model-card:focus-within {
+  border-color: var(--accent);
+}
+
+.settings-model-card-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 4px;
+}
+
+.settings-model-card-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.settings-model-field {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-model-field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 2px;
 }
 
 .settings-gear:hover {

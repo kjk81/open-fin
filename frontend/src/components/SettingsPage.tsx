@@ -81,6 +81,7 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
   const [llmMode, setLlmMode] = useState<"cloud" | "ollama">("cloud");
   const [llmOrder, setLlmOrder] = useState<LlmProvider[]>([]);
   const [dragging, setDragging] = useState<LlmProvider | null>(null);
+  const [advancedModelMode, setAdvancedModelMode] = useState(false);
 
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
   const contentRef = useRef<HTMLDivElement>(null);
@@ -103,6 +104,10 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
         setLlmSettings(llmData);
         setLlmMode(llmData.mode);
         setLlmOrder(llmData.fallback_order);
+        // Initialise advanced model toggle from persisted .env state
+        setAdvancedModelMode(
+          Boolean(valuesData["SUBAGENT_PROVIDER"]?.is_set || valuesData["SUBAGENT_MODEL"]?.is_set)
+        );
         // Set first category as active
         if (schemaData.length > 0) {
           const cats = [...new Set(schemaData.map((s) => s.category))];
@@ -122,7 +127,10 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
 
   const categories = useMemo(() => {
     const cats = [...new Set(schema.map((s) => s.category))];
-    // Add LLM Routing as a virtual category at the end
+    // Ensure "LLM Routing" is always the last nav item, whether it arrived
+    // from schema items (4 role-override env vars) or needs to be injected.
+    const idx = cats.indexOf("LLM Routing");
+    if (idx !== -1) cats.splice(idx, 1);
     cats.push("LLM Routing");
     return cats;
   }, [schema]);
@@ -242,7 +250,19 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
       setLlmMode(llmSettings.mode);
       setLlmOrder(llmSettings.fallback_order);
     }
+    setAdvancedModelMode(
+      Boolean(values["SUBAGENT_PROVIDER"]?.is_set || values["SUBAGENT_MODEL"]?.is_set)
+    );
     setError(null);
+  };
+
+  const handleAdvancedToggle = () => {
+    if (advancedModelMode) {
+      // Switching back to simple mode: clear subagent overrides
+      handleEditChange("SUBAGENT_PROVIDER", "");
+      handleEditChange("SUBAGENT_MODEL", "");
+    }
+    setAdvancedModelMode((prev) => !prev);
   };
 
   // ── Scroll spy ─────────────────────────────────────────────────────────
@@ -326,9 +346,17 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
         {/* Setting sections by category */}
         {categories.map((cat) => {
           if (cat === "LLM Routing") {
-            // Always show LLM Routing unless search filters it out
-            if (searchQuery.trim() && !cat.toLowerCase().includes(searchQuery.toLowerCase())) {
-              return null;
+            // Show section if search matches category name or any of the role-config keys
+            if (searchQuery.trim()) {
+              const q = searchQuery.toLowerCase();
+              const routingItems = groupedSettings["LLM Routing"] || [];
+              const schemaMatch = routingItems.some(
+                (s) =>
+                  s.label.toLowerCase().includes(q) ||
+                  s.key.toLowerCase().includes(q) ||
+                  s.description.toLowerCase().includes(q)
+              );
+              if (!"llm routing model configuration".includes(q) && !schemaMatch) return null;
             }
             return (
               <section
@@ -336,7 +364,70 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
                 id={`settings-cat-${cat}`}
                 ref={(el) => { sectionRefs.current[cat] = el; }}
               >
-                <h3 className="settings-category-title">{cat}</h3>
+                {/* ── Model Configuration ──────────────────────────────── */}
+                <h3 className="settings-category-title">Model Configuration</h3>
+                <p className="settings-category-desc">
+                  Assign specific providers and models to each AI role. By default both roles share the global fallback chain.
+                </p>
+
+                {/* Advanced-mode toggle */}
+                <div className="settings-item">
+                  <div className="settings-toggle-row">
+                    <div style={{ flex: 1 }}>
+                      <div className="settings-item-label" style={{ marginBottom: 4 }}>
+                        Advanced: Use separate models for Reasoning (Subagent)?
+                      </div>
+                      <div className="settings-item-desc" style={{ marginBottom: 0 }}>
+                        When off, both Agent and Subagent use the Primary Model. When on, configure each role independently.
+                      </div>
+                    </div>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={advancedModelMode}
+                        onChange={handleAdvancedToggle}
+                      />
+                      <span className="settings-toggle-slider" />
+                    </label>
+                  </div>
+                </div>
+
+                {/* Simple mode: single Primary Model block */}
+                {!advancedModelMode ? (
+                  <ModelBlock
+                    title="Primary Model"
+                    desc="Used by both the Agent (routing / prose) and Subagent (tool use). Leave blank to use the provider's default model."
+                    providerKey="AGENT_PROVIDER"
+                    modelKey="AGENT_MODEL"
+                    values={values}
+                    edits={edits}
+                    onChange={handleEditChange}
+                  />
+                ) : (
+                  <div className="settings-model-cards">
+                    <ModelBlock
+                      title="Agent (Orchestrator)"
+                      desc="Fast model for chat, routing, and response synthesis."
+                      providerKey="AGENT_PROVIDER"
+                      modelKey="AGENT_MODEL"
+                      values={values}
+                      edits={edits}
+                      onChange={handleEditChange}
+                    />
+                    <ModelBlock
+                      title="Subagent (Analyst)"
+                      desc="High-reasoning model for tool use and deep analysis. Falls back to Agent config when unset."
+                      providerKey="SUBAGENT_PROVIDER"
+                      modelKey="SUBAGENT_MODEL"
+                      values={values}
+                      edits={edits}
+                      onChange={handleEditChange}
+                    />
+                  </div>
+                )}
+
+                {/* ── LLM Routing ───────────────────────────────────── */}
+                <h3 className="settings-category-title" style={{ marginTop: 32 }}>LLM Routing</h3>
                 <p className="settings-category-desc">
                   Configure how the AI agent selects LLM providers and fallback order.
                 </p>
@@ -443,6 +534,64 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Model config block (provider select + model name input) ──────────────
+
+const PROVIDER_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "— Use global fallback —" },
+  { value: "openrouter", label: "OpenRouter" },
+  { value: "gemini", label: "Gemini" },
+  { value: "openai", label: "OpenAI" },
+  { value: "groq", label: "Groq" },
+  { value: "huggingface", label: "Hugging Face Inference" },
+  { value: "ollama", label: "Ollama (Local)" },
+];
+
+interface ModelBlockProps {
+  title: string;
+  desc: string;
+  providerKey: string;
+  modelKey: string;
+  values: import("../types").SettingsValues;
+  edits: Record<string, string>;
+  onChange: (key: string, value: string) => void;
+}
+
+function ModelBlock({ title, desc, providerKey, modelKey, values, edits, onChange }: ModelBlockProps) {
+  const providerVal = edits[providerKey] ?? (values[providerKey]?.value ?? "");
+  const modelVal = edits[modelKey] ?? (values[modelKey]?.value ?? "");
+  return (
+    <div className="settings-model-card">
+      <h4 className="settings-model-card-title">{title}</h4>
+      <p className="settings-model-card-desc">{desc}</p>
+      <div className="settings-model-field">
+        <label className="settings-model-field-label">Provider</label>
+        <div className="settings-item-key" style={{ marginBottom: 6 }}>{providerKey}</div>
+        <select
+          value={providerVal}
+          onChange={(e) => onChange(providerKey, e.target.value)}
+          style={{ background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)", padding: "7px 10px", borderRadius: 4, fontFamily: "inherit", fontSize: 13, width: "100%", outline: "none" }}
+        >
+          {PROVIDER_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </div>
+      <div className="settings-model-field" style={{ marginTop: 10 }}>
+        <label className="settings-model-field-label">Model</label>
+        <div className="settings-item-key" style={{ marginBottom: 6 }}>{modelKey}</div>
+        <input
+          type="text"
+          value={modelVal}
+          placeholder="Use provider default"
+          onChange={(e) => onChange(modelKey, e.target.value)}
+          spellCheck={false}
+          style={{ background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)", padding: "7px 10px", borderRadius: 4, fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 13, width: "100%", outline: "none" }}
+        />
+      </div>
     </div>
   );
 }
