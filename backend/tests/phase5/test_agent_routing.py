@@ -263,8 +263,14 @@ class TestPerformanceKeywordRouting:
         result = await intent_router(state)
         assert result["intent"] == "ticker_deep_dive"
 
-    async def test_no_ticker_performance_stays_general(self) -> None:
-        """Performance keywords alone (no tickers) must not force deep_dive."""
+    async def test_no_ticker_performance_routes_to_deep_dive(self) -> None:
+        """Performance keywords alone (no ticker) now route to ticker_deep_dive
+        so the tool-calling loop can resolve the entity via live data.
+
+        This test was updated when the NLP routing fix (Issue 2) was applied.
+        The old behaviour (falling through to general_chat) caused the agent to
+        answer using stale training weights instead of fetching live data.
+        """
         from langchain_core.messages import HumanMessage
 
         from agent.nodes import intent_router
@@ -274,7 +280,7 @@ class TestPerformanceKeywordRouting:
             "context_refs": [],
         }
         result = await intent_router(state)
-        assert result["intent"] == "general_chat"
+        assert result["intent"] == "ticker_deep_dive"
 
     async def test_explicit_deep_dive_keywords_take_priority(self) -> None:
         """Explicit deep-dive words must take priority over performance catch."""

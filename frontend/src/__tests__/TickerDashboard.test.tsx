@@ -85,6 +85,7 @@ function makeContext(overrides: Partial<ReturnType<typeof AppContextModule.useAp
     addSystemMessage: vi.fn(),
     toggleTerminal: vi.fn(),
     clearTerminalLogs: vi.fn(),
+    setDebugMode: vi.fn(),
   };
 }
 
@@ -187,6 +188,17 @@ describe("TickerDashboard", () => {
     });
     expect(screen.getByText("Generating AI analysis...")).toBeInTheDocument();
     expect(screen.getByTestId("spinner")).toBeInTheDocument();
+  });
+
+  it("shows the fallback error message when the AI analysis completes with no report", () => {
+    setup({
+      selectedSymbol: "AAPL",
+      activeTickerLoading: false,
+      activeTicker: mockTicker,
+      tickerReport: "",
+      tickerReportLoading: false,
+    });
+    expect(screen.getByText(/No analysis available. Please verify your LLM API key configuration/i)).toBeInTheDocument();
   });
 
   it("does NOT show the loading spinner message when tickerReport already has content", () => {

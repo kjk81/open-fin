@@ -828,6 +828,23 @@ body {
   transition: border-color 0.15s;
 }
 
+.chat-textarea::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-textarea::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.chat-textarea::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
 .chat-textarea:focus {
   border-color: var(--accent);
 }

@@ -313,6 +313,25 @@ export async function streamChat(
       body: JSON.stringify({ message, session_id: sessionId, context_refs: contextRefs }),
       signal,
     });
+    if (!res.ok) {
+      let errDetail = `HTTP ${res.status}`;
+      try {
+        const text = await res.text();
+        if (text) {
+          try {
+            const body = JSON.parse(text);
+            if (body.detail) errDetail = String(body.detail);
+            else errDetail = text;
+          } catch {
+            errDetail = text;
+          }
+        }
+      } catch {
+        // failed to read text
+      }
+      onError(errDetail);
+      return;
+    }
   } catch (e) {
     if ((e as Error).name === "AbortError") return;
     onError(String(e));
