@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from apscheduler.triggers.cron import CronTrigger
@@ -14,6 +14,10 @@ from strategies import REGISTRY
 
 router = APIRouter()
 TICKER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,14}$")
+# Cron: 5 space-separated fields, each containing digits, *, -, /, or comma.
+_CRON_RE = re.compile(
+    r"^[\d*/,\-]+(?:\s+[\d*/,\-]+){4}$"
+)
 
 
 class LoadoutCreate(BaseModel):
@@ -23,6 +27,20 @@ class LoadoutCreate(BaseModel):
     parameters: dict = Field(default_factory=dict)
     max_qty: int = Field(default=100, ge=1, le=1_000_000)
     dry_run: bool = True
+
+    @field_validator("schedule")
+    @classmethod
+    def validate_cron_schedule(cls, v: str) -> str:
+        schedule = v.strip()
+        if not _CRON_RE.match(schedule):
+            raise ValueError(
+                f"Invalid cron schedule: expected 5 space-separated fields, got {schedule!r}"
+            )
+        try:
+            CronTrigger.from_crontab(schedule)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"Invalid cron schedule: {exc}") from exc
+        return schedule
 
 
 class LoadoutUpdate(BaseModel):
@@ -48,9 +66,14 @@ def _normalize_ticker(raw: str) -> str:
 
 def _validate_schedule(raw: str) -> str:
     schedule = raw.strip()
+    if not _CRON_RE.match(schedule):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid cron schedule: expected 5 space-separated fields, got {schedule!r}",
+        )
     try:
         CronTrigger.from_crontab(schedule)
-    except ValueError as exc:
+    except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"Invalid cron schedule: {exc}") from exc
     return schedule
 

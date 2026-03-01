@@ -57,7 +57,7 @@ function sha256File(filePath: string): string {
 function ensureVenv(): void {
   const BACKEND_DIR = devBackendDir();
   const { venvDir } = userDataPaths();
-  const { pip } = venvBinaries(venvDir);
+  const { pip, python } = venvBinaries(venvDir);
 
   const requirementsPath = path.join(BACKEND_DIR, "requirements.txt");
   const markerPath = path.join(venvDir, "requirements.sha256");
@@ -66,7 +66,11 @@ function ensureVenv(): void {
     throw new Error(`Backend not found at ${BACKEND_DIR}`);
   }
 
-  if (!fs.existsSync(venvDir)) {
+  if (!fs.existsSync(venvDir) || !fs.existsSync(pip) || !fs.existsSync(python)) {
+    if (fs.existsSync(venvDir)) {
+      console.log("[Electron] Venv is incomplete (missing binaries). Recreating...");
+      fs.rmSync(venvDir, { recursive: true, force: true });
+    }
     console.log("[Electron] Creating Python venv at", venvDir);
     fs.mkdirSync(venvDir, { recursive: true });
     execSync(`python -m venv "${venvDir}"`, { cwd: BACKEND_DIR, stdio: "inherit" });
@@ -118,6 +122,7 @@ function frozenWorkerExe(): string {
 let backendProcess: ChildProcess | null = null;
 let workerProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
+let venvReady = false;
 
 function pipeOutput(child: ChildProcess, label: string): void {
   child.stdout?.on("data", (data: Buffer) => {
@@ -150,6 +155,7 @@ function startBackend(): void {
 
     try {
       ensureVenv();
+      venvReady = true;
     } catch (err) {
       console.error("[Electron] Failed to prepare backend:", err);
       return;
@@ -194,6 +200,11 @@ function startWorker(): void {
     const BACKEND_DIR = devBackendDir();
     const { venvDir } = userDataPaths();
     const { python } = venvBinaries(venvDir);
+
+    if (!venvReady) {
+      console.error("[Electron] Skipping worker start: venv is not ready.");
+      return;
+    }
 
     console.log("[Electron] Starting worker (dev)...");
     workerProcess = spawn(

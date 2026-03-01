@@ -7,7 +7,7 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import type { BackendStatus, ChatMessage, PortfolioPosition, SourceRef, TickerInfo, ToolEvent, WatchlistItem } from "../types";
+import type { BackendStatus, ChatMessage, PortfolioPosition, SourceRef, TerminalLogEntry, TerminalLogLevel, TerminalLogType, TickerInfo, ToolEvent, WatchlistItem } from "../types";
 import {
   fetchHealth,
   fetchPortfolio,
@@ -35,6 +35,8 @@ interface AppState {
   tickerReport: string;
   tickerReportLoading: boolean;
   selectedSymbol: string | null;
+  terminalLogs: TerminalLogEntry[];
+  terminalOpen: boolean;
 }
 
 const initialState: AppState = {
@@ -50,6 +52,8 @@ const initialState: AppState = {
   tickerReport: "",
   tickerReportLoading: false,
   selectedSymbol: null,
+  terminalLogs: [],
+  terminalOpen: false,
 };
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -70,7 +74,10 @@ type Action =
   | { type: "SET_LAST_MESSAGE_SOURCES"; sources: SourceRef[] }
   | { type: "SET_TICKER_REPORT"; report: string }
   | { type: "APPEND_TICKER_REPORT"; content: string }
-  | { type: "SET_TICKER_REPORT_LOADING"; loading: boolean };
+  | { type: "SET_TICKER_REPORT_LOADING"; loading: boolean }
+  | { type: "APPEND_TERMINAL_LOG"; entry: TerminalLogEntry }
+  | { type: "TOGGLE_TERMINAL" }
+  | { type: "CLEAR_TERMINAL_LOGS" };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -129,6 +136,14 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, tickerReport: state.tickerReport + action.content };
     case "SET_TICKER_REPORT_LOADING":
       return { ...state, tickerReportLoading: action.loading };
+    case "APPEND_TERMINAL_LOG": {
+      const logs = [...state.terminalLogs, action.entry];
+      return { ...state, terminalLogs: logs.length > 500 ? logs.slice(logs.length - 500) : logs };
+    }
+    case "TOGGLE_TERMINAL":
+      return { ...state, terminalOpen: !state.terminalOpen };
+    case "CLEAR_TERMINAL_LOGS":
+      return { ...state, terminalLogs: [] };
     default:
       return state;
   }
@@ -144,6 +159,8 @@ interface AppContextValue {
   reloadWatchlist: () => void;
   toggleWatchlist: (ticker: string) => Promise<void>;
   addSystemMessage: (content: string) => Promise<void>;
+  toggleTerminal: () => void;
+  clearTerminalLogs: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -161,6 +178,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const sessionId = useRef(crypto.randomUUID());
   const tickerAbortRef = useRef<AbortController | null>(null);
   const reportAbortRef = useRef<AbortController | null>(null);
+  const terminalLogIdRef = useRef(0);
 
   // Backend health polling
   useEffect(() => {
@@ -315,6 +333,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const toggleTerminal = useCallback(() => {
+    dispatch({ type: "TOGGLE_TERMINAL" });
+  }, []);
+
+  const clearTerminalLogs = useCallback(() => {
+    dispatch({ type: "CLEAR_TERMINAL_LOGS" });
+  }, []);
+
+  const termLog = useCallback(
+    (type: TerminalLogType, level: TerminalLogLevel, message: string) => {
+      dispatch({
+        type: "APPEND_TERMINAL_LOG",
+        entry: { id: terminalLogIdRef.current++, timestamp: Date.now(), type, level, message },
+      });
+    },
+    []
+  );
+
   const sendMessage = useCallback((text: string, contextRefs: string[]) => {
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -333,24 +369,57 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "ADD_CHAT_MESSAGE", message: assistantMsg });
     dispatch({ type: "SET_CHAT_STREAMING", streaming: true });
 
+    const preview = text.length > 60 ? text.slice(0, 57) + "..." : text;
+    termLog("system", "info", `Pipeline initiated → "${preview}"`);
+
+    let tokenLogged = false;
     streamChat(
       text,
       sessionId.current,
       contextRefs,
-      (token) => dispatch({ type: "APPEND_TO_LAST_MESSAGE", content: token }),
-      () => dispatch({ type: "SET_CHAT_STREAMING", streaming: false }),
+      (token) => {
+        dispatch({ type: "APPEND_TO_LAST_MESSAGE", content: token });
+        if (!tokenLogged) {
+          tokenLogged = true;
+          termLog("agent", "info", "Generating response...");
+        }
+      },
+      () => {
+        dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
+        termLog("done", "success", "Pipeline complete.");
+      },
       (err) => {
         dispatch({ type: "APPEND_TO_LAST_MESSAGE", content: `\n[Error: ${err}]` });
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
+        termLog("error", "error", err);
       },
       undefined, // signal
-      (toolEvent) => dispatch({ type: "UPDATE_TOOL_EVENT", event: toolEvent }),
-      (sources) => dispatch({ type: "SET_LAST_MESSAGE_SOURCES", sources }),
+      (toolEvent) => {
+        dispatch({ type: "UPDATE_TOOL_EVENT", event: toolEvent });
+        if (toolEvent.status === "running") {
+          const argsPreview = toolEvent.args
+            ? Object.entries(toolEvent.args)
+                .slice(0, 2)
+                .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+                .join(", ")
+            : "";
+          termLog("tool_start", "info", `Executing ${toolEvent.tool}(${argsPreview})...`);
+        } else if (toolEvent.status === "done") {
+          const ms = toolEvent.durationMs ? ` in ${toolEvent.durationMs}ms` : "";
+          termLog("tool_end", "success", `${toolEvent.tool}${ms} [SUCCESS]`);
+        } else {
+          termLog("tool_end", "error", `${toolEvent.tool} [ERROR]`);
+        }
+      },
+      (sources) => {
+        dispatch({ type: "SET_LAST_MESSAGE_SOURCES", sources });
+        termLog("sources", "info", `${sources.length} citation(s) attached.`);
+      },
     );
-  }, []);
+  }, [termLog]);
 
   return (
-    <AppContext.Provider value={{ state, selectTicker, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage }}>
+    <AppContext.Provider value={{ state, selectTicker, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage, toggleTerminal, clearTerminalLogs }}>
       {children}
     </AppContext.Provider>
   );

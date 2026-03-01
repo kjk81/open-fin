@@ -3,8 +3,13 @@ import { useAppContext } from "../context/AppContext";
 import { syncPortfolio } from "../api";
 import { fmt } from "../utils";
 import { Spinner } from "./Spinner";
+import { SettingsGearButton } from "./SettingsGearButton";
 
-export function PortfolioSidebar() {
+interface PortfolioSidebarProps {
+  onOpenSettings?: () => void;
+}
+
+export function PortfolioSidebar({ onOpenSettings }: PortfolioSidebarProps) {
   const { state, selectTicker, reloadPortfolio } = useAppContext();
   const { portfolio, selectedSymbol, watchlist } = state;
   const [syncing, setSyncing] = useState(false);
@@ -24,7 +29,7 @@ export function PortfolioSidebar() {
   };
 
   return (
-    <aside className="pane-sidebar">
+    <aside className="pane-sidebar" style={{ display: "flex", flexDirection: "column" }}>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
         <h2 className="pane-title">Portfolio</h2>
@@ -118,6 +123,12 @@ export function PortfolioSidebar() {
           </div>
         )}
       </div>
+      {/* Gear icon pinned to bottom */}
+      {onOpenSettings && (
+        <div style={{ marginTop: "auto", paddingTop: "16px", borderTop: "1px solid var(--border)" }}>
+          <SettingsGearButton onClick={onOpenSettings} />
+        </div>
+      )}
     </aside>
   );
 }

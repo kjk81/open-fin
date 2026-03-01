@@ -209,3 +209,44 @@ export interface WorkerStatusInfo {
 export interface StrategyInfo {
   name: string;
 }
+
+// ── Settings ────────────────────────────────────────────────────────────────
+
+export interface SettingSchema {
+  key: string;
+  label: string;
+  description: string;
+  type: "string" | "secret" | "number" | "select";
+  category: string;
+  options?: string[];
+}
+
+export interface SettingValue {
+  is_set: boolean;
+  preview: string;
+  value: string;
+}
+
+export type SettingsValues = Record<string, SettingValue>;
+
+// ── Agent Terminal ────────────────────────────────────────────────────────────
+
+export type TerminalLogLevel = "info" | "success" | "warn" | "error";
+
+export type TerminalLogType =
+  | "system"
+  | "agent"
+  | "tool_start"
+  | "tool_end"
+  | "sources"
+  | "kg_update"
+  | "error"
+  | "done";
+
+export interface TerminalLogEntry {
+  id: number;
+  timestamp: number;
+  type: TerminalLogType;
+  level: TerminalLogLevel;
+  message: string;
+}

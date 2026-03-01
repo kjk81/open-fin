@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from database import SessionLocal, engine
 from models import Base, KGNode
 from routers.portfolio import sync_alpaca_portfolio
-from routers import alerts, chat, graph, loadouts, llm, portfolio, ticker, trade, watchlist
+from routers import alerts, chat, graph, loadouts, llm, portfolio, settings, ticker, trade, watchlist
 from agent.llm import ensure_default_settings
 
 logging.basicConfig(
@@ -169,7 +169,7 @@ app.add_middleware(
         "app://.",               # Electron production
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
@@ -182,6 +182,7 @@ app.include_router(watchlist.router, prefix="/api")
 app.include_router(graph.router, prefix="/api")
 app.include_router(loadouts.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
+app.include_router(settings.router, prefix="/api")
 
 
 @app.get("/api/health")

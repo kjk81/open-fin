@@ -18,6 +18,8 @@ import type {
   PaginatedExecutions,
   WorkerStatusInfo,
   StrategyInfo,
+  SettingSchema,
+  SettingsValues,
 } from "./types";
 
 const API = "http://localhost:8000";
@@ -208,6 +210,32 @@ export async function fetchStrategies(): Promise<StrategyInfo[]> {
   const res = await fetch(`${API}/api/strategies`);
   if (!res.ok) throw new Error(`Strategies fetch failed: ${res.status}`);
   return res.json();
+}
+
+// ── Settings ─────────────────────────────────────────────────────────────────
+
+export async function fetchSettingsSchema(): Promise<SettingSchema[]> {
+  const res = await fetch(`${API}/api/settings/schema`);
+  if (!res.ok) throw new Error(`Settings schema fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSettings(): Promise<SettingsValues> {
+  const res = await fetch(`${API}/api/settings`);
+  if (!res.ok) throw new Error(`Settings fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function saveSettings(values: Record<string, string | null>): Promise<void> {
+  const res = await fetch(`${API}/api/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `Settings save failed: ${res.status}`);
+  }
 }
 
 export async function streamChat(
