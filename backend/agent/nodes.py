@@ -28,6 +28,8 @@ _TICKER_STOPWORDS: frozenset[str] = frozenset({
     "TWO", "WAY", "WHO", "DID", "INC", "LTD", "LLC",
 })
 
+_AT_TICKER_RE = re.compile(r'@([A-Z]{1,5})\b')
+_DOLLAR_TICKER_RE = re.compile(r'\$([A-Z]{1,5})\b')
 _TICKER_RE = re.compile(r'\b[A-Z]{1,5}\b')
 
 # ---------------------------------------------------------------------------
@@ -52,6 +54,50 @@ _SEC_FILINGS_KEYWORDS = frozenset({
 _PORTFOLIO_KEYWORDS = frozenset({
     "portfolio", "holdings", "positions", "my stocks", "my holdings", "my shares",
 })
+_PERFORMANCE_KEYWORDS = frozenset({
+    "performance", "how is", "how's", "how did", "doing",
+    "price", "stock price", "current price", "recent",
+    "today", "this week", "this month", "returns",
+    "gained", "lost", "rally", "drop", "movement",
+    "trend", "momentum", "up today", "down today",
+})
+
+
+# ---------------------------------------------------------------------------
+# Ticker extraction utility (public — used by tests and intent_router)
+# ---------------------------------------------------------------------------
+
+
+def extract_tickers(text: str) -> list[str]:
+    """Extract ticker symbols from *text* with support for @, $, and bare forms.
+
+    Passes are applied in priority order:
+    1. ``@TICKER`` — UI @ mentions (e.g. ``@RBLX``)
+    2. ``$TICKER`` — Finance $ convention (e.g. ``$AAPL``)
+    3. Bare uppercase — fallback (e.g. ``TSLA``)
+
+    Returns a deduplicated list preserving first-seen order.  Stopwords and
+    sequences outside the 1–5 character range are filtered.
+    """
+    seen: set[str] = set()
+    tickers: list[str] = []
+
+    for sym in _AT_TICKER_RE.findall(text):
+        if sym not in _TICKER_STOPWORDS and sym not in seen:
+            seen.add(sym)
+            tickers.append(sym)
+
+    for sym in _DOLLAR_TICKER_RE.findall(text):
+        if sym not in _TICKER_STOPWORDS and sym not in seen:
+            seen.add(sym)
+            tickers.append(sym)
+
+    for sym in _TICKER_RE.findall(text):
+        if sym not in _TICKER_STOPWORDS and sym not in seen:
+            seen.add(sym)
+            tickers.append(sym)
+
+    return tickers
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +113,9 @@ async def intent_router(state: ChatState) -> dict:
 
     lower = user_text.lower()
 
+    # --- Extract tickers (supports @TICKER, $TICKER, bare uppercase) ---
+    tickers = extract_tickers(user_text)
+
     # --- Classify intent ---
     if any(kw in lower for kw in _SCREENING_KEYWORDS):
         intent = "stock_screening"
@@ -76,19 +125,15 @@ async def intent_router(state: ChatState) -> dict:
         intent = "trade_recommendation"
     elif any(kw in lower for kw in _DEEP_DIVE_KEYWORDS):
         intent = "ticker_deep_dive"
+    elif tickers and any(kw in lower for kw in _PERFORMANCE_KEYWORDS):
+        # Queries like "How is @RBLX doing?" or "price of TSLA" must route
+        # to the finance tool loop, not fall through to general_chat.
+        intent = "ticker_deep_dive"
     else:
         intent = "general_chat"
 
-    # --- Extract tickers ---
-    raw = _TICKER_RE.findall(user_text)
-    seen: set[str] = set()
-    tickers: list[str] = []
-    for t in raw:
-        if t not in _TICKER_STOPWORDS and t not in seen:
-            seen.add(t)
-            tickers.append(t)
-
     # --- Explicit ticker refs (e.g. coming from @AAPL mentions in the UI) ---
+    seen: set[str] = set(tickers)
     for ref in state.get("context_refs", []):
         if not ref or ref == "user_portfolio":
             continue
@@ -421,12 +466,9 @@ async def generation_node(state: ChatState) -> dict:
     ticker_reports = state.get("ticker_reports", {})
 
     # --- Build system prompt ---
-    system_parts = [
-        "You are Open-Fin, an expert financial AI co-pilot running as a desktop application. "
-        "You provide accurate, data-driven financial analysis and trading insights. "
-        "Be concise, precise, and professional. "
-        "Always clarify that your responses are informational and not financial advice.",
-    ]
+    from .prompts import get_generation_prompt
+
+    system_parts = [get_generation_prompt()]
 
     if injected_context:
         system_parts.append(f"\n\nCURRENT USER PORTFOLIO:\n{injected_context}")
