@@ -5,7 +5,7 @@
   "main": "dist/electron/main.js",
   "scripts": {
     "dev:vite": "vite --port 5173",
-    "dev:electron": "tsc -p tsconfig.node.json && electron .",
+    "dev:electron": "tsc -p tsconfig.node.json && electron . --dev",
     "dev": "concurrently -k -p \"[{name}]\" -n \"VITE,ELECTRON\" -c \"cyan,yellow\" \"npm run dev:vite\" \"wait-on http://localhost:5173 && npm run dev:electron\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:renderer": "vite build",

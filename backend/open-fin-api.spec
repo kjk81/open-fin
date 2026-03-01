@@ -143,8 +143,8 @@ a = Analysis(
 from PyInstaller.utils.hooks import collect_all
 
 fastembed_datas, fastembed_binaries, fastembed_hiddenimports = collect_all("fastembed")
-a.datas += fastembed_datas
-a.binaries += fastembed_binaries
+a.datas += [(src, dest, 'DATA') for src, dest in fastembed_datas]
+a.binaries += [(src, dest, 'BINARY') for src, dest in fastembed_binaries]
 a.hiddenimports += fastembed_hiddenimports
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)

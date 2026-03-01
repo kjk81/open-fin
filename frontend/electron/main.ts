@@ -134,11 +134,11 @@ let workerProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
 let venvReady = false;
 
-/** The TCP port the backend process is actually listening on. */
-let backendPort: number = PREFERRED_PORT;
-
 /** Default preferred port — overridden by the backend's stdout sentinel. */
 const PREFERRED_PORT = 8000;
+
+/** The TCP port the backend process is actually listening on. */
+let backendPort: number = PREFERRED_PORT;
 
 /**
  * Probe TCP ports starting at *preferred* and return the first one that is
@@ -192,7 +192,7 @@ function killPortProcess(port: number): void {
         out
           .split(/\r?\n/)
           .map((line) => line.trim().split(/\s+/).pop())
-          .filter((p): p is string => Boolean(p) && /^\d+$/.test(p)),
+          .filter((p): p is string => p != null && /^\d+$/.test(p)),
       );
       for (const pid of pids) {
         console.log(`[Electron] Killing orphaned process on port ${port} (PID ${pid})`);
@@ -420,7 +420,9 @@ function createWindow(): void {
   const devUrl = "http://localhost:5173";
   const prodFile = path.join(__dirname, "..", "renderer", "index.html");
 
-  if (fs.existsSync(prodFile) && !process.argv.includes("--dev")) {
+  const isDev =
+    process.argv.includes("--dev") || !!process.env.VITE_DEV_SERVER_URL;
+  if (!isDev && fs.existsSync(prodFile)) {
     mainWindow.loadFile(prodFile);
   } else {
     mainWindow.loadURL(devUrl);
