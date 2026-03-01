@@ -1,3 +1,6 @@
+import type { AnchorHTMLAttributes, ClassAttributes } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useAppContext } from "../context/AppContext";
 import type { ChatMessage as ChatMessageType, SourceRef, ToolEvent, TradeOrder } from "../types";
 
@@ -78,101 +81,71 @@ function CitationFooter({ sources }: { sources: SourceRef[] }) {
   );
 }
 
-function parseMentions(
-  text: string,
-  selectTicker: (s: string) => void,
-  keyStart: number,
-): { nodes: JSX.Element[]; nextKey: number } {
-  const nodes: JSX.Element[] = [];
-  let last = 0;
-  let key = keyStart;
-  const re = /@([A-Za-z]{1,10})\b/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = re.exec(text)) !== null) {
-    if (match.index > last) {
-      const markdown = parseMarkdownInline(text.slice(last, match.index), key);
-      nodes.push(...markdown.nodes);
-      key = markdown.nextKey;
-    }
-
-    const raw = match[1].toUpperCase();
-    const isPortfolio = raw === "PORTFOLIO";
-
-    if (isPortfolio) {
-      nodes.push(
-        <span key={key++} className="mention-tag">
-          @portfolio
-        </span>,
-      );
-    } else {
-      nodes.push(
-        <button
-          key={key++}
-          className="mention-tag mention-tag--clickable"
-          onClick={() => selectTicker(raw)}
-          title={`View ${raw}`}
-        >
-          @{raw}
-        </button>,
-      );
-    }
-
-    last = match.index + match[0].length;
-  }
-
-  if (last < text.length) {
-    const markdown = parseMarkdownInline(text.slice(last), key);
-    nodes.push(...markdown.nodes);
-    key = markdown.nextKey;
-  }
-
-  return { nodes, nextKey: key };
+/** Convert @AAPL mentions into markdown links with a custom mention:// scheme */
+function preprocessMentions(text: string): string {
+  return text.replace(/@([A-Za-z]{1,10})\b/g, (_, sym: string) => {
+    const upper = sym.toUpperCase();
+    return `[@${upper}](mention://${upper})`;
+  });
 }
 
-function parseMarkdownInline(
-  text: string,
-  keyStart: number,
-): { nodes: JSX.Element[]; nextKey: number } {
-  const nodes: JSX.Element[] = [];
-  const tokenRe = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^\s)]+\))/g;
-  let key = keyStart;
-  let last = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = tokenRe.exec(text)) !== null) {
-    if (match.index > last) {
-      nodes.push(<span key={key++}>{text.slice(last, match.index)}</span>);
-    }
-
-    const token = match[0];
-    if (token.startsWith("**") && token.endsWith("**")) {
-      nodes.push(<strong key={key++}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith("*") && token.endsWith("*")) {
-      nodes.push(<em key={key++}>{token.slice(1, -1)}</em>);
-    } else if (token.startsWith("`") && token.endsWith("`")) {
-      nodes.push(<code key={key++}>{token.slice(1, -1)}</code>);
-    } else {
-      const linkMatch = token.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
-      if (linkMatch) {
-        nodes.push(
-          <a key={key++} href={linkMatch[2]} target="_blank" rel="noreferrer">
-            {linkMatch[1]}
-          </a>,
+/** Build the custom components map for ReactMarkdown */
+function makeComponents(selectTicker: (s: string) => void) {
+  return {
+    // Intercept mention:// links to render as clickable mention tags
+    a: ({ href, children, ...props }: ClassAttributes<HTMLAnchorElement> & AnchorHTMLAttributes<HTMLAnchorElement>) => {
+      if (href?.startsWith("mention://")) {
+        const sym = href.slice("mention://".length);
+        if (sym === "PORTFOLIO") {
+          return <span className="mention-tag">@portfolio</span>;
+        }
+        return (
+          <button
+            className="mention-tag mention-tag--clickable"
+            onClick={() => selectTicker(sym)}
+            title={`View ${sym}`}
+          >
+            {children}
+          </button>
         );
-      } else {
-        nodes.push(<span key={key++}>{token}</span>);
       }
-    }
+      return (
+        <a href={href} target="_blank" rel="noreferrer" {...props}>
+          {children}
+        </a>
+      );
+    },
+    // Distinguish inline code from fenced code blocks
+    code: ({ className, children, ...props }: React.HTMLAttributes<HTMLElement> & { className?: string }) => {
+      const isBlock = Boolean(className);
+      if (isBlock) {
+        return <pre><code className={className} {...props}>{children}</code></pre>;
+      }
+      return <code className={className} {...props}>{children}</code>;
+    },
+  };
+}
 
-    last = match.index + token.length;
-  }
-
-  if (last < text.length) {
-    nodes.push(<span key={key++}>{text.slice(last)}</span>);
-  }
-
-  return { nodes, nextKey: key };
+function MarkdownSegment({
+  text,
+  selectTicker,
+  segKey,
+}: {
+  text: string;
+  selectTicker: (s: string) => void;
+  segKey: number;
+}) {
+  const components = makeComponents(selectTicker);
+  return (
+    <ReactMarkdown
+      key={segKey}
+      remarkPlugins={[remarkGfm]}
+      urlTransform={(url) => url}
+      components={components}
+    >
+      {preprocessMentions(text)}
+    </ReactMarkdown>
+  );
 }
 
 function renderContent(
@@ -188,12 +161,9 @@ function renderContent(
   let match: RegExpExecArray | null;
 
   while ((match = TRADE_RE.exec(text)) !== null) {
-    // Process text before this trade block through the mention parser
     if (match.index > last) {
       const segment = text.slice(last, match.index);
-      const { nodes, nextKey } = parseMentions(segment, selectTicker, key);
-      parts.push(...nodes);
-      key = nextKey;
+      parts.push(<MarkdownSegment key={key++} segKey={key} text={segment} selectTicker={selectTicker} />);
     }
 
     // Try to parse the trade JSON
@@ -229,25 +199,19 @@ function renderContent(
         </button>,
       );
     } else {
-      // Fallback: render the raw block as text
       parts.push(<span key={key++}>{match[0]}</span>);
     }
 
     last = match.index + match[0].length;
   }
 
-  // Process any remaining text after the last trade block
   if (last < text.length) {
     const segment = text.slice(last);
-    const { nodes, nextKey } = parseMentions(segment, selectTicker, key);
-    parts.push(...nodes);
-    key = nextKey;
+    parts.push(<MarkdownSegment key={key++} segKey={key} text={segment} selectTicker={selectTicker} />);
   }
 
-  // If no trade blocks at all, run the full text through mention parsing
   if (parts.length === 0) {
-    const { nodes } = parseMentions(text, selectTicker, key);
-    parts.push(...nodes);
+    parts.push(<MarkdownSegment key={key++} segKey={key} text={text} selectTicker={selectTicker} />);
   }
 
   return parts;

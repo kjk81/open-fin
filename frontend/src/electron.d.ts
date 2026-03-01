@@ -10,6 +10,7 @@ declare global {
       minimizeWindow: () => Promise<void>;
       toggleMaximizeWindow: () => Promise<boolean>;
       closeWindow: () => Promise<void>;
+      wipeUserData: () => Promise<{ success: boolean; error?: string }>;
     };
   }
 }

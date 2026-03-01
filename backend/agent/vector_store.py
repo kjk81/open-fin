@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -68,6 +69,9 @@ _UPSERT_BATCH_SIZE = 500
 
 # Soft-delete fraction that triggers a full index rebuild
 _REBUILD_THRESHOLD = 0.10
+
+# Sidecar metadata schema version — bump when index format changes
+_META_SCHEMA_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +106,52 @@ def _index_path() -> Path:
 
 def _lock_path() -> Path:
     return _index_dir() / "openfin.index.lock"
+
+
+def _meta_path() -> Path:
+    return _index_dir() / "openfin.meta.json"
+
+
+# ---------------------------------------------------------------------------
+# Sidecar metadata helpers
+# ---------------------------------------------------------------------------
+
+def _write_meta(node_count: int) -> None:
+    """Write sidecar metadata describing the current index configuration."""
+    meta = {
+        "schema_version": _META_SCHEMA_VERSION,
+        "embed_model": _EMBED_MODEL_NAME,
+        "embed_dim": _EMBED_DIM,
+        "node_count": node_count,
+        "built_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        _meta_path().write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:
+        logger.warning("Failed to write FAISS sidecar metadata.", exc_info=True)
+
+
+def _read_meta() -> dict | None:
+    """Read sidecar metadata; returns None if missing or unreadable."""
+    p = _meta_path()
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Failed to read FAISS sidecar metadata at %s.", p)
+        return None
+
+
+def _is_index_compatible(meta: dict | None) -> bool:
+    """Return True if the on-disk index matches the current embedding config."""
+    if meta is None:
+        return False  # Missing metadata = legacy index, force rebuild
+    return (
+        meta.get("embed_model") == _EMBED_MODEL_NAME
+        and meta.get("embed_dim") == _EMBED_DIM
+        and meta.get("schema_version") == _META_SCHEMA_VERSION
+    )
 
 
 def _fastembed_cache_dir() -> Path:
@@ -234,29 +284,48 @@ class FaissManager:
 
         Called once during FastAPI lifespan startup.  Blocks until complete
         (fastembed may download the model on the first call).
+
+        On startup, the sidecar metadata is checked first.  If the stored
+        embedding model or dimension differs from the current config (e.g. the
+        user upgraded Open-Fin with a new embedding model), the stale index
+        and metadata files are deleted and a fresh index is built from
+        ``kg_nodes``.
         """
         path = _index_path()
         if path.exists():
-            try:
-                self._index = faiss.read_index(
-                    str(path),
-                    faiss.IO_FLAG_MMAP | faiss.IO_FLAG_READ_ONLY,
-                )
-                logger.info(
-                    "FAISS index loaded from %s (%d vectors)",
-                    path,
-                    self._index.ntotal,
-                )
-                return
-            except FileNotFoundError:
-                # Race: file disappeared between exists() and read_index()
-                logger.info(
-                    "FAISS index file vanished before read — rebuilding from DB."
-                )
-            except Exception as exc:
+            meta = _read_meta()
+            if not _is_index_compatible(meta):
                 logger.warning(
-                    "Failed to load FAISS index (%s), rebuilding from DB.", exc
+                    "FAISS index is incompatible with current config "
+                    "(meta=%s, expected model=%s dim=%d schema_version=%d). "
+                    "Clearing and rebuilding.",
+                    meta,
+                    _EMBED_MODEL_NAME,
+                    _EMBED_DIM,
+                    _META_SCHEMA_VERSION,
                 )
+                path.unlink(missing_ok=True)
+                _meta_path().unlink(missing_ok=True)
+            else:
+                try:
+                    self._index = faiss.read_index(
+                        str(path),
+                        faiss.IO_FLAG_MMAP | faiss.IO_FLAG_READ_ONLY,
+                    )
+                    logger.info(
+                        "FAISS index loaded from %s (%d vectors)",
+                        path,
+                        self._index.ntotal,
+                    )
+                    return
+                except FileNotFoundError:
+                    logger.info(
+                        "FAISS index file vanished before read — rebuilding from DB."
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to load FAISS index (%s), rebuilding from DB.", exc
+                    )
 
         logger.info("No valid FAISS index found — building from kg_nodes...")
         self._rebuild_from_db(db)
@@ -292,6 +361,7 @@ class FaissManager:
             inner = faiss.IndexFlatL2(_EMBED_DIM)
             self._index = faiss.IndexIDMap(inner)
             self._write_index_locked()
+            _write_meta(0)
             logger.info("FAISS index initialised (empty).")
             return
 
@@ -312,6 +382,7 @@ class FaissManager:
         index.add_with_ids(vecs, ids)
         self._index = index
         self._write_index_locked()
+        _write_meta(index.ntotal)
         logger.info("FAISS index rebuilt with %d vectors.", index.ntotal)
 
     def _write_index_locked(self) -> None:

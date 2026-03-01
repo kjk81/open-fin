@@ -53,6 +53,33 @@ export async function fetchHealth(): Promise<boolean> {
   }
 }
 
+export interface HealthResponse {
+  status: string;
+  faiss_ready: boolean;
+  migration_ok: boolean;
+  migration_error: string | null;
+  needs_wipe: boolean;
+}
+
+export async function fetchHealthDetailed(): Promise<HealthResponse | null> {
+  try {
+    const res = await fetch(`${API}/api/health`);
+    if (!res.ok) return null;
+    return res.json() as Promise<HealthResponse>;
+  } catch {
+    return null;
+  }
+}
+
+export async function wipeData(scope: "all" | "db" | "faiss" = "all"): Promise<boolean> {
+  try {
+    const res = await fetch(`${API}/api/admin/wipe?scope=${scope}`, { method: "POST" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchTicker(symbol: string): Promise<TickerInfo> {
   const res = await fetch(`${API}/api/ticker/${encodeURIComponent(symbol)}`);
   if (!res.ok) throw new Error(`Ticker fetch failed: ${res.status}`);

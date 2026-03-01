@@ -15,4 +15,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("window-maximize-toggle"),
   closeWindow: (): Promise<void> =>
     ipcRenderer.invoke("window-close"),
+  wipeUserData: (): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke("wipe-user-data"),
 });

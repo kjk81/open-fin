@@ -165,3 +165,13 @@ class AnomalyAlert(Base):
     detected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     researched: Mapped[bool] = mapped_column(Boolean, default=False)
     research_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SchemaVersion(Base):
+    """Single-row table tracking the applied schema migration version."""
+
+    __tablename__ = "schema_version"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    migrated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

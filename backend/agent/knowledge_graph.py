@@ -65,8 +65,9 @@ _CO_MENTION_STOPWORDS: frozenset[str] = frozenset(
     }
 )
 
-# Prefer $-prefixed tickers; fall back to bare uppercase if none found.
-_DOLLAR_TICKER_RE = re.compile(r"\$([A-Z]{1,5})\b")
+# Co-mention extraction — supports @TICKER, $TICKER, and bare uppercase.
+_AT_CO_MENTION_RE = re.compile(r"@([A-Za-z]{1,5})\b")
+_DOLLAR_TICKER_RE = re.compile(r"\$([A-Za-z]{1,5})\b")
 _BARE_TICKER_RE = re.compile(r"\b([A-Z]{1,5})\b")
 
 # ---------------------------------------------------------------------------
@@ -820,10 +821,12 @@ def upsert_ticker_snapshot(
 
         # --- Co-mention edges ---
         if report_text:
-            # Prefer $-prefixed tickers; fall back to bare uppercase if none found
-            dollar_tickers = set(_DOLLAR_TICKER_RE.findall(report_text))
-            if dollar_tickers:
-                candidates = dollar_tickers
+            # Prefer explicit-prefix tickers (@/$); fall back to bare uppercase.
+            at_tickers = {t.upper() for t in _AT_CO_MENTION_RE.findall(report_text)}
+            dollar_tickers = {t.upper() for t in _DOLLAR_TICKER_RE.findall(report_text)}
+            prefixed = at_tickers | dollar_tickers
+            if prefixed:
+                candidates = prefixed
             else:
                 candidates = set(_BARE_TICKER_RE.findall(report_text))
             candidates.discard(symbol)

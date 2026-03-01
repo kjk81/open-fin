@@ -612,6 +612,42 @@ async def finalize_response(state: AgentState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node: force_tool_retry
+# ---------------------------------------------------------------------------
+
+
+async def force_tool_retry(state: AgentState) -> dict:
+    """Inject a mandatory-tool-use directive and signal one "round" consumed.
+
+    Called when the LLM returns a plain-text response on the very first pass
+    of the finance loop — the "fast bypass" bug.  A SystemMessage is appended
+    to the message list telling the LLM it MUST call at least one finance tool
+    before synthesising an answer.  ``tool_call_count`` is incremented by 1
+    so that this branch fires at most once; on the next pass, if the LLM still
+    produces no tool calls, ``_should_continue_tools`` will fall through to
+    ``finalize_response`` rather than looping forever.
+    """
+    tickers = state.get("tickers_mentioned", [])
+    ticker_hint = f" for {', '.join(tickers)}" if tickers else ""
+
+    directive = SystemMessage(
+        content=(
+            "MANDATORY TOOL USE — You responded without calling any tools. "
+            f"You MUST call at least one finance tool{ticker_hint} before "
+            "answering.  Your training data is stale.  Use get_company_profile, "
+            "get_technical_snapshot, get_financial_statements, or another "
+            "appropriate tool NOW.  Do NOT produce a final answer until you "
+            "have retrieved live data."
+        )
+    )
+    logger.info("force_tool_retry: injecting mandatory-tool directive%s", ticker_hint)
+    return {
+        "messages": [directive],
+        "tool_call_count": 1,   # counts as one round to prevent infinite retry
+    }
+
+
+# ---------------------------------------------------------------------------
 # Conditional edge functions
 # ---------------------------------------------------------------------------
 
@@ -627,17 +663,18 @@ def _route_after_context(state: AgentState) -> str:
 
 
 def _should_continue_tools(state: AgentState) -> str:
-    """Decide whether to execute more tools or finalise the answer.
+    """Decide whether to execute more tools, force a retry, or finalise.
 
-    Returns ``"execute_tool_calls"`` when the last AI message contains tool
-    calls **and** we have not exceeded ``MAX_TOOL_ROUNDS``.  Otherwise
-    returns ``"finalize_response"`` to break the loop.
+    Decision matrix:
+    - tool_calls present AND count < MAX_TOOL_ROUNDS → execute_tool_calls
+    - NO tool_calls AND count == 0 (first pass, bypassed) → force_tool_retry
+    - otherwise → finalize_response
     """
     last_msg = state["messages"][-1] if state.get("messages") else None
 
     has_tool_calls = (
         isinstance(last_msg, AIMessage)
-        and getattr(last_msg, "tool_calls", None)
+        and bool(getattr(last_msg, "tool_calls", None))
     )
 
     count = state.get("tool_call_count", 0)
@@ -650,6 +687,18 @@ def _should_continue_tools(state: AgentState) -> str:
             "Tool-loop ceiling reached (%d/%d rounds). Forcing finalize.",
             count, MAX_TOOL_ROUNDS,
         )
+        return "finalize_response"
+
+    # LLM produced a text response without any tool calls on the very first
+    # pass — this is the "fast bypass" bug.  Route to force_tool_retry once.
+    if not has_tool_calls and count == 0:
+        logger.warning(
+            "LLM skipped tools on first pass (intent=%s, tickers=%s). "
+            "Injecting mandatory-tool directive and retrying.",
+            state.get("intent", "?"),
+            state.get("tickers_mentioned", []),
+        )
+        return "force_tool_retry"
 
     return "finalize_response"
 
@@ -667,9 +716,10 @@ def build_graph():
                                       ↓ (conditional)
                    finance intent? ────────────────────────────────────┐
                      Yes → route_finance_query ←───────────────┐      │
-                              ↓ (conditional)                  │      │
-                           tool_calls AND count < 5?           │      │
-                              Yes → execute_tool_calls ────────┘      │
+                              ↓ (conditional)              ┌───┘      │
+                           tool_calls AND count < 5?       │          │
+                              Yes → execute_tool_calls ────┘          │
+                              No, count==0 → force_tool_retry ────────┘ (loops back)
                               No  → finalize_response → END           │
                                                                       │
                      No  → generation_node → END  ←───────────────────┘
@@ -682,6 +732,7 @@ def build_graph():
     builder.add_node("generation_node", generation_node)
     builder.add_node("route_finance_query", route_finance_query)
     builder.add_node("execute_tool_calls", execute_tool_calls)
+    builder.add_node("force_tool_retry", force_tool_retry)
     builder.add_node("finalize_response", finalize_response)
 
     # -- Edges --
@@ -702,11 +753,13 @@ def build_graph():
         _should_continue_tools,
         {
             "execute_tool_calls": "execute_tool_calls",
+            "force_tool_retry": "force_tool_retry",
             "finalize_response": "finalize_response",
         },
     )
 
     builder.add_edge("execute_tool_calls", "route_finance_query")
+    builder.add_edge("force_tool_retry", "route_finance_query")
     builder.add_edge("finalize_response", END)
     builder.add_edge("generation_node", END)
 

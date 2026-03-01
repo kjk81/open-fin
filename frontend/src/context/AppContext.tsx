@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { BackendStatus, ChatMessage, PortfolioPosition, SourceRef, TerminalLogEntry, TerminalLogLevel, TerminalLogType, TickerInfo, ToolEvent, WatchlistItem } from "../types";
 import {
-  fetchHealth,
+  fetchHealthDetailed,
   fetchPortfolio,
   fetchTicker,
   postSystemEvent,
@@ -24,6 +24,7 @@ import {
 
 interface AppState {
   backendStatus: BackendStatus;
+  migrationError: string | null;
   workerOnline: boolean;
   portfolio: PortfolioPosition[];
   watchlist: WatchlistItem[];
@@ -34,6 +35,7 @@ interface AppState {
   chatStreaming: boolean;
   tickerReport: string;
   tickerReportLoading: boolean;
+  tickerReportError: string | null;
   selectedSymbol: string | null;
   terminalLogs: TerminalLogEntry[];
   terminalOpen: boolean;
@@ -41,6 +43,7 @@ interface AppState {
 
 const initialState: AppState = {
   backendStatus: "connecting",
+  migrationError: null,
   workerOnline: false,
   portfolio: [],
   watchlist: [],
@@ -51,6 +54,7 @@ const initialState: AppState = {
   chatStreaming: false,
   tickerReport: "",
   tickerReportLoading: false,
+  tickerReportError: null,
   selectedSymbol: null,
   terminalLogs: [],
   terminalOpen: false,
@@ -60,6 +64,7 @@ const initialState: AppState = {
 
 type Action =
   | { type: "SET_BACKEND_STATUS"; status: BackendStatus }
+  | { type: "SET_MIGRATION_ERROR"; error: string | null }
   | { type: "SET_WORKER_ONLINE"; online: boolean }
   | { type: "SET_PORTFOLIO"; positions: PortfolioPosition[] }
   | { type: "SET_WATCHLIST"; items: WatchlistItem[] }
@@ -75,6 +80,7 @@ type Action =
   | { type: "SET_TICKER_REPORT"; report: string }
   | { type: "APPEND_TICKER_REPORT"; content: string }
   | { type: "SET_TICKER_REPORT_LOADING"; loading: boolean }
+  | { type: "SET_TICKER_REPORT_ERROR"; error: string | null }
   | { type: "APPEND_TERMINAL_LOG"; entry: TerminalLogEntry }
   | { type: "TOGGLE_TERMINAL" }
   | { type: "CLEAR_TERMINAL_LOGS" };
@@ -83,6 +89,8 @@ function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "SET_BACKEND_STATUS":
       return { ...state, backendStatus: action.status };
+    case "SET_MIGRATION_ERROR":
+      return { ...state, migrationError: action.error };
     case "SET_WORKER_ONLINE":
       return { ...state, workerOnline: action.online };
     case "SET_PORTFOLIO":
@@ -136,6 +144,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, tickerReport: state.tickerReport + action.content };
     case "SET_TICKER_REPORT_LOADING":
       return { ...state, tickerReportLoading: action.loading };
+    case "SET_TICKER_REPORT_ERROR":
+      return { ...state, tickerReportError: action.error };
     case "APPEND_TERMINAL_LOG": {
       const logs = [...state.terminalLogs, action.entry];
       return { ...state, terminalLogs: logs.length > 500 ? logs.slice(logs.length - 500) : logs };
@@ -186,9 +196,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const MAX = 30;
 
     const check = async () => {
-      const ok = await fetchHealth();
-      if (ok) {
-        dispatch({ type: "SET_BACKEND_STATUS", status: "running" });
+      const health = await fetchHealthDetailed();
+      if (health) {
+        if (health.needs_wipe) {
+          dispatch({ type: "SET_MIGRATION_ERROR", error: health.migration_error });
+          dispatch({ type: "SET_BACKEND_STATUS", status: "migration_error" });
+        } else {
+          dispatch({ type: "SET_BACKEND_STATUS", status: "running" });
+        }
         clearInterval(interval);
       } else {
         attempts++;
@@ -281,6 +296,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_ACTIVE_TICKER_ERROR", error: null });
     dispatch({ type: "SET_TICKER_REPORT", report: "" });
     dispatch({ type: "SET_TICKER_REPORT_LOADING", loading: true });
+    dispatch({ type: "SET_TICKER_REPORT_ERROR", error: null });
 
     const tickerAbort = new AbortController();
     tickerAbortRef.current = tickerAbort;
@@ -304,7 +320,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
               dispatch({ type: "APPEND_TICKER_REPORT", content: token });
           },
           () => dispatch({ type: "SET_TICKER_REPORT_LOADING", loading: false }),
-          () => dispatch({ type: "SET_TICKER_REPORT_LOADING", loading: false }),
+          (errMsg) => {
+            dispatch({ type: "SET_TICKER_REPORT_LOADING", loading: false });
+            dispatch({ type: "SET_TICKER_REPORT_ERROR", error: errMsg || "Analysis failed" });
+          },
           reportAbort.signal,
         );
       })
@@ -313,6 +332,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "SET_ACTIVE_TICKER_LOADING", loading: false });
         dispatch({ type: "SET_ACTIVE_TICKER_ERROR", error: String(err) });
         dispatch({ type: "SET_TICKER_REPORT_LOADING", loading: false });
+        dispatch({ type: "SET_TICKER_REPORT_ERROR", error: "Failed to load analysis" });
       });
   }, []);
 

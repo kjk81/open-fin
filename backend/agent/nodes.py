@@ -28,8 +28,8 @@ _TICKER_STOPWORDS: frozenset[str] = frozenset({
     "TWO", "WAY", "WHO", "DID", "INC", "LTD", "LLC",
 })
 
-_AT_TICKER_RE = re.compile(r'@([A-Z]{1,5})\b')
-_DOLLAR_TICKER_RE = re.compile(r'\$([A-Z]{1,5})\b')
+_AT_TICKER_RE = re.compile(r'@([A-Za-z]{1,5})\b')
+_DOLLAR_TICKER_RE = re.compile(r'\$([A-Za-z]{1,5})\b')
 _TICKER_RE = re.compile(r'\b[A-Z]{1,5}\b')
 
 # ---------------------------------------------------------------------------
@@ -83,11 +83,13 @@ def extract_tickers(text: str) -> list[str]:
     tickers: list[str] = []
 
     for sym in _AT_TICKER_RE.findall(text):
+        sym = sym.upper()
         if sym not in _TICKER_STOPWORDS and sym not in seen:
             seen.add(sym)
             tickers.append(sym)
 
     for sym in _DOLLAR_TICKER_RE.findall(text):
+        sym = sym.upper()
         if sym not in _TICKER_STOPWORDS and sym not in seen:
             seen.add(sym)
             tickers.append(sym)

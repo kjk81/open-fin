@@ -12,6 +12,7 @@ import { LoadoutsPanel } from "./components/LoadoutsPanel";
 import { SettingsPage } from "./components/SettingsPage";
 import { SettingsGearButton } from "./components/SettingsGearButton";
 import { TitleBar } from "./components/TitleBar";
+import { MigrationErrorModal } from "./components/MigrationErrorModal";
 
 export default function App() {
   return (
@@ -96,8 +97,13 @@ function Layout() {
         </div>
       </header>
 
+      {/* Migration error modal — shown above everything */}
+      {backendStatus === "migration_error" && (
+        <MigrationErrorModal error={state.migrationError} />
+      )}
+
       {/* Connecting overlay */}
-      {backendStatus !== "running" ? (
+      {backendStatus !== "running" && backendStatus !== "migration_error" ? (
         <div
           style={{
             gridColumn: "1 / -1",
@@ -121,7 +127,8 @@ function Layout() {
             </span>
           )}
         </div>
-      ) : activeTab === "copilot" ? (
+      ) : backendStatus === "migration_error" ? null
+      : activeTab === "copilot" ? (
         <>
           <PortfolioSidebar onOpenSettings={() => setActiveTab("settings")} />
           <ChatBox />
