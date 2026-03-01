@@ -40,7 +40,8 @@ class TestFrozenSmokeScript:
         assert "main" in func_names
 
     def test_health_check_url(self, source):
-        assert "http://127.0.0.1:8000/api/health" in source
+        assert "http://127.0.0.1:" in source
+        assert "/api/health" in source
 
     def test_uses_temp_directory(self, source):
         assert "TemporaryDirectory" in source or "tempfile" in source

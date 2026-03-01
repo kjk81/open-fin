@@ -77,7 +77,8 @@ def db_session() -> Generator[Session, None, None]:
     session = TestSessionLocal(bind=connection)
     yield session
     session.close()
-    transaction.rollback()
+    if transaction.is_active:
+        transaction.rollback()
     connection.close()
 
 
