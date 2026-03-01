@@ -107,7 +107,7 @@ def _build_fastembed_stub():
     mod = ModuleType("fastembed")
 
     class TextEmbedding:
-        def __init__(self, model_name: str = ""):
+        def __init__(self, model_name: str = "", **kwargs):
             pass
 
         def embed(self, texts):

@@ -31,6 +31,7 @@ async def lifespan(app: FastAPI):
     # ------------------------------------------------------------------ #
     # Startup                                                              #
     # ------------------------------------------------------------------ #
+    global _faiss_ready
 
     logger.info("Creating database tables...")
     Base.metadata.create_all(bind=engine)
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         await asyncio.to_thread(faiss_mgr.load_or_build, db)
+        _faiss_ready = True
     finally:
         db.close()
 
@@ -185,6 +187,11 @@ app.include_router(alerts.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 
 
+# Module-level flag set to True once FAISS initialises successfully.
+# Populated during lifespan startup; read by the health endpoint.
+_faiss_ready: bool = False
+
+
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "faiss_ready": _faiss_ready}

@@ -6,6 +6,7 @@ declare global {
       getBackendStatus: () => Promise<{ running: boolean }>;
       getWorkerStatus: () => Promise<{ running: boolean }>;
       stopBackend: () => Promise<{ stopped: boolean }>;
+      getBackendPort: () => Promise<number>;
     };
   }
 }

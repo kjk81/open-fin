@@ -22,7 +22,27 @@ import type {
   SettingsValues,
 } from "./types";
 
-const API = "http://localhost:8000";
+// Mutable base URL — updated by initApiBase() before the React tree renders.
+// Falls back to port 8000 when running outside of Electron (plain browser, tests).
+let API = "http://localhost:8000";
+
+/**
+ * Resolve the actual backend port from the Electron main process and update
+ * the module-level API base URL.  Must be called (and awaited) once in
+ * main.tsx before ReactDOM renders the application.
+ *
+ * In non-Electron environments (plain browser, unit tests) this is a no-op.
+ */
+export async function initApiBase(): Promise<void> {
+  try {
+    const port = await window.electronAPI?.getBackendPort?.();
+    if (port && port !== 8000) {
+      API = `http://localhost:${port}`;
+    }
+  } catch {
+    // Not in Electron context or IPC unavailable — keep default.
+  }
+}
 
 export async function fetchHealth(): Promise<boolean> {
   try {

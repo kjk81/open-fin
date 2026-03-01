@@ -7,4 +7,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("get-worker-status"),
   stopBackend: (): Promise<{ stopped: boolean }> =>
     ipcRenderer.invoke("stop-backend"),
+  getBackendPort: (): Promise<number> =>
+    ipcRenderer.invoke("get-backend-port"),
 });

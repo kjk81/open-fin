@@ -104,6 +104,59 @@ def _lock_path() -> Path:
     return _index_dir() / "openfin.index.lock"
 
 
+def _fastembed_cache_dir() -> Path:
+    """Return the directory used to cache downloaded FastEmbed models.
+
+    Resolution order:
+    1. ``FASTEMBED_CACHE_PATH`` env var (set by Electron to
+       ``userData/fastembed_cache`` — keeps all user data co-located and
+       avoids permission issues with Windows system temp directories).
+    2. Frozen build fallback: sibling directory next to the executable.
+    3. Source-tree fallback: ``backend/fastembed_cache``.
+    """
+    override = os.getenv("FASTEMBED_CACHE_PATH")
+    if override:
+        p = Path(override).expanduser().resolve()
+    elif getattr(sys, "frozen", False):
+        p = Path(sys.executable).resolve().parent / "fastembed_cache"
+    else:
+        p = Path(__file__).resolve().parent.parent / "fastembed_cache"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _make_embedder() -> TextEmbedding:
+    """Construct a ``TextEmbedding`` instance with a resolved cache directory.
+
+    Also suppresses the HuggingFace symlink warning that fires on Windows
+    (requires Developer Mode or Admin rights) by setting the relevant env var
+    before the fastembed/huggingface_hub import-time side-effect.
+
+    Raises ``SystemExit(1)`` with a clear message when the model cannot be
+    downloaded or written (e.g. permission errors on a restricted system).
+    """
+    # Suppress the symlink-creation warning raised by huggingface_hub on
+    # Windows systems where Developer Mode / elevation is not available.
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+    cache_dir = _fastembed_cache_dir()
+    logger.info("FastEmbed cache directory: %s", cache_dir)
+
+    try:
+        return TextEmbedding(model_name=_EMBED_MODEL_NAME, cache_dir=str(cache_dir))
+    except (OSError, PermissionError) as exc:
+        logger.error(
+            "Failed to initialise FastEmbed model '%s' (cache: %s): %s\n"
+            "On Windows, ensure the cache directory is writable. "
+            "Set FASTEMBED_CACHE_PATH to a directory you own, or enable "
+            "Developer Mode to allow symlinks.",
+            _EMBED_MODEL_NAME,
+            cache_dir,
+            exc,
+        )
+        raise SystemExit(1) from exc
+
+
 # ---------------------------------------------------------------------------
 # FaissManager
 # ---------------------------------------------------------------------------
@@ -117,7 +170,7 @@ class FaissManager:
     """
 
     def __init__(self) -> None:
-        self._embedder: TextEmbedding = TextEmbedding(model_name=_EMBED_MODEL_NAME)
+        self._embedder: TextEmbedding = _make_embedder()
         self._index: faiss.Index | None = None
         self._file_lock: FileLock = FileLock(str(_lock_path()), timeout=30)
 
