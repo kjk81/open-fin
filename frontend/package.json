@@ -2,6 +2,11 @@
   "name": "open-fin-frontend",
   "version": "0.1.0",
   "description": "Open-Fin Desktop Financial AI Co-pilot",
+  "author": "Open-Fin Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kjk81/open-fin.git"
+  },
   "main": "dist/electron/main.js",
   "scripts": {
     "dev:vite": "vite --port 5173",
@@ -27,7 +32,6 @@
     "sigma": "^3.0.2"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.2.1",
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.1",
@@ -36,7 +40,6 @@
     "cross-env": "^7.0.3",
     "electron": "^35.7.5",
     "electron-builder": "^26.8.1",
-    "tailwindcss": "^4.2.1",
     "typescript": "^5.6.3",
     "vite": "^7.3.1",
     "wait-on": "^8.0.1"
@@ -55,7 +58,11 @@
       {
         "from": "../backend/dist/api",
         "to": "backend/api",
-        "filter": ["**/*", "!**/fastembed_cache/**", "!**/faiss_data/**"]
+        "filter": [
+          "**/*",
+          "!**/fastembed_cache/**",
+          "!**/faiss_data/**"
+        ]
       },
       {
         "from": "../backend/dist/worker",

@@ -15,13 +15,13 @@ const LOG_PREFIX: Record<TerminalLogEntry["type"], string> = {
   done: "[SYSTEM]",
 };
 
-// ── Tag color classes (Tailwind) ──────────────────────────────────────────────
+// ── Tag level CSS modifier classes ────────────────────────────────────────────
 
 const LEVEL_CLASSES: Record<TerminalLogEntry["level"], string> = {
-  info: "text-blue-400",
-  success: "text-green-400",
-  warn: "text-yellow-400",
-  error: "text-red-400",
+  info: "terminal-log-prefix--info",
+  success: "terminal-log-prefix--success",
+  warn: "terminal-log-prefix--warn",
+  error: "terminal-log-prefix--error",
 };
 
 // ── Single log line ───────────────────────────────────────────────────────────
@@ -36,10 +36,10 @@ const LogLine = memo(function LogLine({ entry }: LogLineProps) {
   const levelClass = LEVEL_CLASSES[entry.level];
 
   return (
-    <div className="flex gap-2 leading-5 py-px">
-      <span className="text-zinc-600 shrink-0">[{ts}]</span>
-      <span className={`${levelClass} shrink-0 font-semibold`}>{prefix}</span>
-      <span className="text-zinc-300 break-all">{entry.message}</span>
+    <div className="terminal-log-line">
+      <span className="terminal-log-time">[{ts}]</span>
+      <span className={`terminal-log-prefix ${levelClass}`}>{prefix}</span>
+      <span className="terminal-log-msg">{entry.message}</span>
     </div>
   );
 });
@@ -69,30 +69,20 @@ export const AgentTerminal = memo(function AgentTerminal() {
   }, [toggleTerminal]);
 
   return (
-    <div className="flex flex-col border-t border-zinc-700 bg-zinc-950" style={{ height: "220px" }}>
+    <div className="terminal-panel" style={{ height: "220px" }}>
       {/* Header bar */}
-      <div className="flex items-center justify-between px-3 py-1 bg-zinc-900 border-b border-zinc-700 shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="text-zinc-400 text-xs font-mono font-semibold tracking-wider uppercase">
-            Terminal
-          </span>
-          <span className="text-zinc-600 text-xs font-mono">
+      <div className="terminal-header">
+        <div className="terminal-header-left">
+          <span className="terminal-title">Terminal</span>
+          <span className="terminal-entry-count">
             {terminalLogs.length} {terminalLogs.length === 1 ? "entry" : "entries"}
           </span>
         </div>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={handleClear}
-            className="text-zinc-500 hover:text-zinc-300 text-xs font-mono px-2 py-0.5 rounded hover:bg-zinc-800 transition-colors"
-            title="Clear terminal"
-          >
+        <div className="terminal-header-actions">
+          <button onClick={handleClear} className="terminal-btn" title="Clear terminal">
             clear
           </button>
-          <button
-            onClick={handleClose}
-            className="text-zinc-500 hover:text-zinc-300 text-xs font-mono px-2 py-0.5 rounded hover:bg-zinc-800 transition-colors"
-            title="Close terminal (Ctrl+`)"
-          >
+          <button onClick={handleClose} className="terminal-btn" title="Close terminal (Ctrl+`)">
             ×
           </button>
         </div>
@@ -101,13 +91,11 @@ export const AgentTerminal = memo(function AgentTerminal() {
       {/* Log area */}
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto px-3 py-2 font-mono text-xs"
+        className="terminal-log-area"
         style={{ scrollbarWidth: "thin", scrollbarColor: "#3f3f46 transparent" }}
       >
         {terminalLogs.length === 0 ? (
-          <span className="text-zinc-600">
-            No events yet. Send a chat message to see agent logs.
-          </span>
+          <span className="terminal-empty">No events yet. Send a chat message to see agent logs.</span>
         ) : (
           terminalLogs.map((entry) => <LogLine key={entry.id} entry={entry} />)
         )}
