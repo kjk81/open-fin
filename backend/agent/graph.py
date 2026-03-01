@@ -313,8 +313,8 @@ def _get_model(role: str = "subagent"):
     (e.g. ``SUBAGENT_OPENROUTER_MODEL``).  Raises ``RuntimeError`` if no
     configured provider is reachable.
     """
-    mode, fallback_order = load_llm_settings()
-    order = _effective_order_for_role(mode, fallback_order, role=role)
+    mode, fallback_order, subagent_order = load_llm_settings()
+    order = _effective_order_for_role(mode, fallback_order, role=role, subagent_order=subagent_order)
 
     for provider in order:
         model = _provider_model(provider, role=role)
@@ -417,10 +417,9 @@ async def route_finance_query(state: AgentState) -> dict:
     The model either makes tool calls (routed to ``execute_tool_calls``) or
     produces a final text answer (routed to ``finalize_response``).
     """
-    model = _get_tool_bound_model(FINANCE_TOOLS, role="subagent")
-    messages = _build_tool_messages(state)
-
     try:
+        model = _get_tool_bound_model(FINANCE_TOOLS, role="subagent")
+        messages = _build_tool_messages(state)
         response: AIMessage = await model.ainvoke(messages)
     except Exception as exc:
         logger.error(

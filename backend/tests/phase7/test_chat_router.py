@@ -259,7 +259,8 @@ class TestChatSSE:
         assert status == 422
 
     async def test_error_event_on_graph_failure(self):
-        """When the graph raises, the client receives an error SSE event."""
+        """When the graph raises a generic exception, the client receives an error SSE event
+        with a message that includes the exception type name."""
         self.graph_mock.astream_events = _error_events
         app = self._app()
 
@@ -271,9 +272,12 @@ class TestChatSSE:
         events = _parse_sse(body)
         error_events = [e for e in events if e["type"] == "error"]
         assert len(error_events) == 1
-        assert error_events[0]["content"] == "An internal error occurred."
+        # Generic exceptions now include the type name for debuggability
+        assert "Exception" in error_events[0]["content"]
         assert "detail" in error_events[0]
         assert "Exception" in error_events[0]["detail"]
+        # Must no longer be the old opaque message
+        assert error_events[0]["content"] != "An internal error occurred."
 
     async def test_timeout_yields_error_event(self, monkeypatch):
         """When the graph exceeds the timeout, client receives a timeout error."""
@@ -335,6 +339,167 @@ class TestChatSSE:
         source_events = [e for e in events if e["type"] == "sources"]
         assert len(source_events) == 1
         assert source_events[0]["sources"][0]["url"] == "https://example.com"
+
+
+class TestChunkContentNormalization:
+    """Unit tests for the on_chat_model_stream chunk.content normalisation logic.
+
+    These tests exercise the SSE endpoint's handling of non-string chunk.content
+    values — the root cause of Issue 1 ([object Object] in AI Analysis panel).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        self.graph_mock = MagicMock()
+        self.upsert_mock = AsyncMock(return_value={"nodes_created": 0, "edges_created": 0, "node_ids": []})
+        self.session_mock = MagicMock()
+        self._patches = [
+            patch("routers.chat.graph", self.graph_mock),
+            patch("routers.chat.upsert_from_tool_results", self.upsert_mock),
+            patch("routers.chat.SessionLocal", MagicMock(return_value=self.session_mock)),
+        ]
+        for p in self._patches:
+            p.start()
+        yield
+        for p in self._patches:
+            p.stop()
+
+    def _app(self) -> FastAPI:
+        app = FastAPI()
+        app.include_router(chat_router, prefix="/api")
+        return app
+
+    async def _post_chat(self, app, payload: dict) -> tuple[int, str]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/chat", json=payload, timeout=30)
+            return resp.status_code, resp.text
+
+    async def test_list_content_is_joined_to_string(self):
+        """chunk.content = list[dict] (structured blocks) → token event content is a string."""
+        async def _list_content_events(*_a, **_kw):
+            class _Chunk:
+                content = [{"type": "text", "text": "Hello"}, {"type": "text", "text": " world"}]
+            yield {"event": "on_chat_model_stream", "name": "", "data": {"chunk": _Chunk()}}
+
+        self.graph_mock.astream_events = _list_content_events
+        _, body = await self._post_chat(self._app(), {
+            "message": "Analyze MSFT",
+            "session_id": _valid_session_id(),
+        })
+        events = _parse_sse(body)
+        token_events = [e for e in events if e["type"] == "token"]
+        assert len(token_events) == 1
+        # Content must be a plain string — never a list or '[object Object]'
+        assert isinstance(token_events[0]["content"], str)
+        assert token_events[0]["content"] == "Hello world"
+
+    async def test_list_content_with_non_text_items_skips_missing_text(self):
+        """Items without a 'text' key contribute an empty string."""
+        async def _partial_content(*_a, **_kw):
+            class _Chunk:
+                content = [{"type": "tool_call", "id": "xyz"}, {"type": "text", "text": "OK"}]
+            yield {"event": "on_chat_model_stream", "name": "", "data": {"chunk": _Chunk()}}
+
+        self.graph_mock.astream_events = _partial_content
+        _, body = await self._post_chat(self._app(), {
+            "message": "test",
+            "session_id": _valid_session_id(),
+        })
+        events = _parse_sse(body)
+        token_events = [e for e in events if e["type"] == "token"]
+        assert len(token_events) == 1
+        assert isinstance(token_events[0]["content"], str)
+        assert token_events[0]["content"] == "OK"
+
+    async def test_empty_list_content_emits_no_token(self):
+        """An empty list normalises to '' which is falsy — no token event emitted."""
+        async def _empty_list(*_a, **_kw):
+            class _Chunk:
+                content = []
+            yield {"event": "on_chat_model_stream", "name": "", "data": {"chunk": _Chunk()}}
+
+        self.graph_mock.astream_events = _empty_list
+        _, body = await self._post_chat(self._app(), {
+            "message": "test",
+            "session_id": _valid_session_id(),
+        })
+        events = _parse_sse(body)
+        token_events = [e for e in events if e["type"] == "token"]
+        assert len(token_events) == 0
+
+    async def test_string_content_passes_through_unchanged(self):
+        """Normal str chunk.content is not modified."""
+        async def _str_content(*_a, **_kw):
+            class _Chunk:
+                content = "MSFT is trading at $400."
+            yield {"event": "on_chat_model_stream", "name": "", "data": {"chunk": _Chunk()}}
+
+        self.graph_mock.astream_events = _str_content
+        _, body = await self._post_chat(self._app(), {
+            "message": "test",
+            "session_id": _valid_session_id(),
+        })
+        events = _parse_sse(body)
+        token_events = [e for e in events if e["type"] == "token"]
+        assert len(token_events) == 1
+        assert token_events[0]["content"] == "MSFT is trading at $400."
+
+    async def test_runtime_error_surfaces_actionable_message(self):
+        """Issue 2: RuntimeError from FallbackLLM → SSE error content is the actual
+        RuntimeError message, not the old opaque 'An internal error occurred.'"""
+        actionable_msg = (
+            "No LLM provider available or all providers failed. "
+            "Configure at least one provider in backend/.env (or the app settings)."
+        )
+
+        async def _runtime_error_events(*_a, **_kw):
+            raise RuntimeError(actionable_msg)
+            yield  # pragma: no cover
+
+        self.graph_mock.astream_events = _runtime_error_events
+        _, body = await self._post_chat(self._app(), {
+            "message": "Should I buy @MSFT",
+            "session_id": _valid_session_id(),
+            "context_refs": ["MSFT"],
+        })
+        events = _parse_sse(body)
+        error_events = [e for e in events if e["type"] == "error"]
+        assert len(error_events) == 1
+        # The full RuntimeError message must reach the client
+        assert error_events[0]["content"] == actionable_msg
+        assert "RuntimeError" in error_events[0]["detail"]
+        # Old generic message must be gone
+        assert error_events[0]["content"] != "An internal error occurred."
+
+    async def test_kg_error_emits_kg_update_with_error_field(self):
+        """Issue 3: when upsert_from_tool_results raises, the endpoint emits a
+        kg_update event with nodes_created=0, edges_created=0, and an error field."""
+        async def _tool_with_result(*_a, **_kw):
+            yield {
+                "event": "on_tool_end",
+                "name": "get_company_profile",
+                "data": {
+                    "input": {"ticker": "MSFT"},
+                    "output": json.dumps({"success": True, "data": {"symbol": "MSFT"}, "sources": []}),
+                },
+            }
+
+        self.graph_mock.astream_events = _tool_with_result
+        # Make upsert fail
+        self.upsert_mock.side_effect = Exception("DB constraint violation")
+
+        _, body = await self._post_chat(self._app(), {
+            "message": "Should I buy @MSFT",
+            "session_id": _valid_session_id(),
+            "context_refs": ["MSFT"],
+        })
+        events = _parse_sse(body)
+        kg_events = [e for e in events if e["type"] == "kg_update"]
+        assert len(kg_events) == 1
+        assert kg_events[0]["nodes_created"] == 0
+        assert kg_events[0]["edges_created"] == 0
+        assert "DB constraint violation" in kg_events[0]["error"]
 
 
 class TestChatSystemEvent:

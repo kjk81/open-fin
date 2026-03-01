@@ -326,4 +326,50 @@ describe("TickerDashboard", () => {
     });
     expect(screen.queryByText(/Checking report cache/i)).not.toBeInTheDocument();
   });
+
+  // ── [object Object] regression (Issue 1) ─────────────────────────────────
+
+  it("never renders [object Object] when tickerReport is a normal string", () => {
+    // Regression guard: if a non-string value ever reaches tickerReport state,
+    // React would render "[object Object]". This must never happen.
+    setup({
+      selectedSymbol: "AAPL",
+      activeTickerLoading: false,
+      activeTicker: mockTicker,
+      tickerReport: "AAPL has strong fundamentals.",
+      tickerReportLoading: false,
+    });
+    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
+    expect(screen.getByText(/AAPL has strong fundamentals/)).toBeInTheDocument();
+  });
+
+  it("shows tickerReportError message (not [object Object]) when analysis errors", () => {
+    // When the LLM call fails, tickerReportError is set and tickerReport stays
+    // empty. The component must render the error string, not an object.
+    setup({
+      selectedSymbol: "AAPL",
+      activeTickerLoading: false,
+      activeTicker: mockTicker,
+      tickerReport: "",
+      tickerReportLoading: false,
+      tickerReportError:
+        "No LLM provider available or all providers failed. " +
+        "Configure at least one provider in backend/.env.",
+    });
+    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
+    expect(screen.getByText(/No LLM provider available/)).toBeInTheDocument();
+  });
+
+  it("shows the 'No analysis available' fallback and NOT [object Object] when report is empty and no error", () => {
+    setup({
+      selectedSymbol: "AAPL",
+      activeTickerLoading: false,
+      activeTicker: mockTicker,
+      tickerReport: "",
+      tickerReportLoading: false,
+      tickerReportError: null,
+    });
+    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
+    expect(screen.getByText(/No analysis available/i)).toBeInTheDocument();
+  });
 });

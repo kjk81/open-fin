@@ -162,10 +162,23 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             elif evt == "on_chat_model_stream":
                 chunk = data.get("chunk")
                 if chunk and hasattr(chunk, "content") and chunk.content:
-                    yield _sse({"type": "token", "content": chunk.content})
+                    content = chunk.content
+                    # LangChain AIMessageChunk.content can be a list of dicts
+                    # (structured content blocks) for some providers. Normalize
+                    # to a plain string before forwarding to the frontend.
+                    if isinstance(content, list):
+                        content = "".join(
+                            item.get("text", "") if isinstance(item, dict) else str(item)
+                            for item in content
+                        )
+                    elif not isinstance(content, str):
+                        content = str(content)
+                    if content:
+                        yield _sse({"type": "token", "content": content})
 
         # ── Post-graph side-effects ────────────────────────────────────────
         kg_result: dict = {"nodes_created": 0, "edges_created": 0, "node_ids": []}
+        kg_error: str | None = None
         if accumulated_tool_results:
             try:
                 kg_result = await upsert_from_tool_results(
@@ -174,6 +187,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                 )
             except Exception as exc:
                 logger.error("KG post-processing error: %s", exc, exc_info=True)
+                kg_error = str(exc)
 
         if accumulated_sources:
             yield _sse({"type": "sources", "sources": accumulated_sources})
@@ -183,6 +197,15 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                 "type": "kg_update",
                 "nodes_created": kg_result["nodes_created"],
                 "edges_created": kg_result["edges_created"],
+            })
+        elif kg_error:
+            # Emit a kg_update with zero counts and an error field so the
+            # frontend can surface the failure in the terminal log.
+            yield _sse({
+                "type": "kg_update",
+                "nodes_created": 0,
+                "edges_created": 0,
+                "error": kg_error,
             })
 
         yield _sse({"type": "done"})
@@ -195,18 +218,19 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "detail": f"TimeoutError: Graph stream exceeded {GRAPH_STREAM_TIMEOUT}s",
         })
     except RuntimeError as exc:
-        # No LLM provider configured
+        # FallbackLLM raises RuntimeError with a user-actionable message when
+        # no provider is configured or all providers fail. Surface it directly.
         logger.error("Chat stream RuntimeError: %s", exc)
         yield _sse({
             "type": "error",
-            "content": "An internal error occurred.",
+            "content": str(exc),
             "detail": f"RuntimeError: {exc}",
         })
     except Exception as exc:
         logger.error("Chat stream error: %s", exc, exc_info=True)
         yield _sse({
             "type": "error",
-            "content": "An internal error occurred.",
+            "content": f"An error occurred ({type(exc).__name__}). Check the terminal for details.",
             "detail": f"{type(exc).__name__}: {exc}",
         })
 

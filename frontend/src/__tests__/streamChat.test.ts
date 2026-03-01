@@ -505,13 +505,16 @@ describe("streamChat", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
-  // ── 14. Unknown event types are ignored ──────────────────────────────────
+  // ── 14. Unknown / unhandled event types are ignored ──────────────────────
 
-  it("ignores unknown event types and continues processing", async () => {
+  it("ignores kg_update and other events when no optional callbacks are provided", async () => {
+    // kg_update is only dispatched when onKgUpdate is supplied; here it is
+    // omitted so the event should be silently skipped.
     const { onToken, onDone, onError } = makeCallbacks();
     vi.mocked(fetch).mockResolvedValue(
       mockSseResponse([
-        sseData({ type: "kg_update", nodes_created: 2 }),
+        sseData({ type: "kg_update", nodes_created: 2, edges_created: 1 }),
+        sseData({ type: "unknown_future_event", payload: "x" }),
         sseData({ type: "token", content: "ok" }),
         sseData({ type: "done" }),
       ]),
@@ -611,6 +614,136 @@ describe("streamChat", () => {
 
     expect(onError).toHaveBeenCalledWith("API key invalid or missing");
     expect(onDone).not.toHaveBeenCalled();
+  });
+
+  // ── 17. Non-string token content coercion (Issue 1 regression) ───────────
+
+  it("coerces list-type token content to a joined string", async () => {
+    // Root cause of Issue 1: LangChain AIMessageChunk.content can be a list
+    // of structured content blocks (e.g. [{"type":"text","text":"Hello"}]).
+    // The frontend must never pass a non-string value to onToken.
+    const { onToken, onDone } = makeCallbacks();
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        // Simulate what the backend emits if normalisation somehow fails and
+        // a list reaches the frontend — the defensive guard must coerce it.
+        `data: ${JSON.stringify({ type: "token", content: [{ type: "text", text: "Hello" }] })}\n\n`,
+        sseData({ type: "done" }),
+      ]),
+    );
+
+    await streamChat("hi", "s1", [], onToken, onDone, vi.fn());
+
+    expect(onToken).toHaveBeenCalledTimes(1);
+    // The value must be a string — never an object
+    const received = onToken.mock.calls[0][0];
+    expect(typeof received).toBe("string");
+    expect(received).not.toBe("[object Object]");
+    expect(onDone).toHaveBeenCalledOnce();
+  });
+
+  it("coerces object-type token content to a string and never emits [object Object]", async () => {
+    const { onToken, onDone } = makeCallbacks();
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        `data: ${JSON.stringify({ type: "token", content: { text: "Hi there" } })}\n\n`,
+        sseData({ type: "done" }),
+      ]),
+    );
+
+    await streamChat("hi", "s1", [], onToken, onDone, vi.fn());
+
+    const received = onToken.mock.calls[0]?.[0];
+    expect(typeof received).toBe("string");
+    expect(received).not.toBe("[object Object]");
+  });
+
+  it("skips token events with null or empty content", async () => {
+    const { onToken, onDone } = makeCallbacks();
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        sseData({ type: "token", content: null }),
+        sseData({ type: "token", content: "" }),
+        sseData({ type: "token", content: "real" }),
+        sseData({ type: "done" }),
+      ]),
+    );
+
+    await streamChat("hi", "s1", [], onToken, onDone, vi.fn());
+
+    // Only the non-empty "real" token should reach onToken
+    expect(onToken).toHaveBeenCalledTimes(1);
+    expect(onToken).toHaveBeenCalledWith("real");
+  });
+
+  // ── 18. Actionable RuntimeError message surfaced (Issue 2 regression) ────
+
+  it("surfaces the full RuntimeError message from the backend, not a generic message", async () => {
+    // Root cause of Issue 2: backend was sending a generic "An internal error
+    // occurred." Now it sends the actual RuntimeError message from FallbackLLM
+    // which is actionable (tells user to configure a provider).
+    const { onToken, onDone, onError } = makeCallbacks();
+    const actionableMsg =
+      "No LLM provider available or all providers failed. " +
+      "Configure at least one provider in backend/.env (or the app settings).";
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        sseData({
+          type: "error",
+          content: actionableMsg,
+          detail: `RuntimeError: ${actionableMsg}`,
+        }),
+      ]),
+    );
+
+    await streamChat("Should I buy @MSFT", "s1", ["MSFT"], onToken, onDone, onError);
+
+    expect(onError).toHaveBeenCalledWith(actionableMsg, expect.stringContaining("RuntimeError"));
+    // Must not be the old generic message
+    expect(onError.mock.calls[0][0]).not.toBe("An internal error occurred.");
+    expect(onDone).not.toHaveBeenCalled();
+    expect(onToken).not.toHaveBeenCalled();
+  });
+
+  // ── 19. kg_update with error field (Issue 3 — KG post-processing failure) ─
+
+  it("calls onKgUpdate with 0/0 and the error string when kg_update has an error field", async () => {
+    // Issue 3 resilience: when KG post-processing fails the backend emits a
+    // kg_update event with nodes_created=0, edges_created=0, and an error field.
+    // The frontend must forward this to onKgUpdate so AppContext can log it.
+    const onKgUpdate = vi.fn<(n: number, e: number, err?: string) => void>();
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        sseData({ type: "kg_update", nodes_created: 0, edges_created: 0, error: "DB constraint violation" }),
+        sseData({ type: "done" }),
+      ]),
+    );
+
+    await streamChat(
+      "Should I buy @MSFT", "s1", ["MSFT"],
+      vi.fn(), vi.fn(), vi.fn(),
+      undefined, undefined, undefined, onKgUpdate,
+    );
+
+    expect(onKgUpdate).toHaveBeenCalledWith(0, 0, "DB constraint violation");
+  });
+
+  it("calls onKgUpdate with 0/0 and undefined error on a normal zero-count update", async () => {
+    const onKgUpdate = vi.fn<(n: number, e: number, err?: string) => void>();
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        sseData({ type: "kg_update", nodes_created: 3, edges_created: 2 }),
+        sseData({ type: "done" }),
+      ]),
+    );
+
+    await streamChat(
+      "hi", "s1", [],
+      vi.fn(), vi.fn(), vi.fn(),
+      undefined, undefined, undefined, onKgUpdate,
+    );
+
+    expect(onKgUpdate).toHaveBeenCalledWith(3, 2, undefined);
   });
 });
 

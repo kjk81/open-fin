@@ -303,7 +303,7 @@ export async function streamChat(
   signal?: AbortSignal,
   onToolEvent?: (event: import("./types").ToolEvent) => void,
   onSources?: (sources: import("./types").SourceRef[]) => void,
-  onKgUpdate?: (nodesCreated: number, edgesCreated: number) => void,
+  onKgUpdate?: (nodesCreated: number, edgesCreated: number, error?: string) => void,
 ): Promise<void> {
   let res: Response;
   try {
@@ -355,7 +355,18 @@ export async function streamChat(
     try {
       const event = JSON.parse(match[1]);
       if (event.type === "token") {
-        onToken(event.content);
+        // Defensive guard: backend normalizes chunk.content to string, but
+        // add a second line of defense here in case a non-string slips through.
+        const raw = event.content;
+        const content =
+          typeof raw === "string"
+            ? raw
+            : raw == null
+              ? ""
+              : typeof raw === "object"
+                ? JSON.stringify(raw)
+                : String(raw);
+        if (content) onToken(content);
       } else if (event.type === "done") {
         settled = true;
         onDone();
@@ -373,7 +384,7 @@ export async function streamChat(
       } else if (event.type === "sources" && onSources) {
         onSources(event.sources ?? []);
       } else if (event.type === "kg_update" && onKgUpdate) {
-        onKgUpdate(event.nodes_created ?? 0, event.edges_created ?? 0);
+        onKgUpdate(event.nodes_created ?? 0, event.edges_created ?? 0, event.error);
       }
     } catch {
       // ignore malformed JSON

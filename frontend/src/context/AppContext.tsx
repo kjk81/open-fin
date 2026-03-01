@@ -450,9 +450,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "SET_LAST_MESSAGE_SOURCES", sources });
         termLog("sources", "info", `${sources.length} citation(s) attached.`);
       },
-      (_nodesCreated, _edgesCreated) => {
-        dispatch({ type: "KG_UPDATED" });
-        termLog("kg_update", "info", `Graph updated: ${_nodesCreated} node(s), ${_edgesCreated} edge(s).`);
+      (_nodesCreated, _edgesCreated, _kgError) => {
+        if (_kgError) {
+          termLog("error", "error", `Knowledge graph update failed: ${_kgError}`);
+        } else {
+          dispatch({ type: "KG_UPDATED" });
+          termLog("kg_update", "info", `Graph updated: ${_nodesCreated} node(s), ${_edgesCreated} edge(s).`);
+        }
       },
     );
   }, [termLog, state.debugMode]);

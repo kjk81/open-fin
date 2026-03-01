@@ -77,6 +77,90 @@ class TestGetToolBoundModelFallback:
                 _get_tool_bound_model([MagicMock()], role="agent")
 
 
+# ── Root cause: _get_model() must unpack 3-tuple from load_llm_settings() ────
+
+class TestGetModelUnpacking:
+    """Regression guard: _get_model() was unpacking load_llm_settings() into 2
+    variables while the function returns a 3-tuple, causing a ValueError on
+    every finance query even when API keys were correctly set.
+
+    These tests call _get_model() WITHOUT mocking _get_model itself so the
+    real unpacking code executes. load_llm_settings is mocked at the boundary
+    to avoid a live DB dependency.
+    """
+
+    def test_get_model_does_not_raise_value_error_when_settings_return_3_tuple(self):
+        """_get_model() must not crash when load_llm_settings returns (mode, order, sub)."""
+        from agent.graph import _get_model
+
+        fake_model = MagicMock()
+
+        with patch("agent.graph.load_llm_settings", return_value=("cloud", ["openrouter"], None)), \
+             patch("agent.graph._provider_model", return_value=fake_model):
+            # Must not raise ValueError: too many values to unpack
+            result = _get_model(role="agent")
+            assert result is fake_model
+
+    def test_get_model_passes_subagent_order_to_effective_order(self):
+        """When a subagent_order is configured, _get_model() uses it for role=subagent."""
+        from agent.graph import _get_model
+
+        fake_model = MagicMock()
+        # subagent_order prioritises groq; agent order has openrouter first
+        captured_orders: list = []
+
+        def capture_provider(provider, role=None):
+            captured_orders.append((provider, role))
+            return fake_model if provider == "groq" else None
+
+        with patch("agent.graph.load_llm_settings",
+                   return_value=("cloud", ["openrouter", "groq"], ["groq", "openrouter"])), \
+             patch("agent.graph._provider_model", side_effect=capture_provider):
+            _get_model(role="subagent")
+
+        # groq must be tried first (subagent_order), not openrouter
+        first_provider, first_role = captured_orders[0]
+        assert first_provider == "groq"
+        assert first_role == "subagent"
+
+    def test_get_model_raises_runtime_error_when_no_provider_configured(self):
+        """When no provider is available, RuntimeError (not ValueError) is raised."""
+        from agent.graph import _get_model
+
+        with patch("agent.graph.load_llm_settings", return_value=("cloud", ["openrouter"], None)), \
+             patch("agent.graph._provider_model", return_value=None):
+            with pytest.raises(RuntimeError, match="No LLM provider available"):
+                _get_model(role="agent")
+
+    async def test_route_finance_query_graceful_on_model_creation_failure(self):
+        """Model creation errors (ValueError, RuntimeError) inside route_finance_query
+        must be caught and returned as an AIMessage — not crash the graph stream."""
+        from agent.graph import route_finance_query
+        from langchain_core.messages import HumanMessage
+
+        state = {
+            "messages": [HumanMessage("Analyze @AAPL")],
+            "intent": "ticker_deep_dive",
+            "tickers_mentioned": ["AAPL"],
+            "context_refs": [],
+            "injected_context": "",
+            "tool_results": {},
+            "finance_loop_count": 0,
+            "current_query": "",
+            "active_skills": [],
+            "tool_call_count": 0,
+        }
+
+        # Simulate the pre-fix crash: ValueError from tuple unpacking
+        with patch("agent.graph._get_tool_bound_model",
+                   side_effect=ValueError("too many values to unpack (expected 2)")):
+            result = await route_finance_query(state)
+
+        last_msg = result["messages"][-1]
+        assert "ValueError" in last_msg.content
+        assert "too many values" in last_msg.content
+
+
 # ── Issue 1/3: route_finance_query graceful error ────────────────────────────
 
 class TestRouteFinanceQueryGraceful:
@@ -203,7 +287,9 @@ class TestSSEDetailField:
         events = _parse_sse(body)
         error_events = [e for e in events if e["type"] == "error"]
         assert len(error_events) == 1
-        assert error_events[0]["content"] == "An internal error occurred."
+        # Generic exceptions now include the type name for debuggability
+        assert "ValueError" in error_events[0]["content"]
+        assert error_events[0]["content"] != "An internal error occurred."
         assert "ValueError" in error_events[0]["detail"]
         assert "bad value" in error_events[0]["detail"]
 
