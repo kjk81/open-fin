@@ -63,6 +63,9 @@ a = Analysis(
         "faiss",
         "fastembed",
         "onnxruntime",
+        # --- PIL (Pillow) required by fastembed at runtime ---
+        "PIL",
+        "PIL.Image",
         # --- Data / scraping ---
         "yfinance",
         "alpaca_trade_api",
@@ -132,7 +135,6 @@ a = Analysis(
         # Exclude heavy packages that are not needed at runtime
         "tkinter",
         "matplotlib",
-        "PIL",
         "scipy",
         "notebook",
         "IPython",
