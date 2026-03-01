@@ -266,7 +266,7 @@ async def read_filings(
     tool_name = "read_filings"
 
     try:
-        llm = get_llm()
+        llm = get_llm(role="agent")
         planning_messages = [
             SystemMessage(
                 content=(

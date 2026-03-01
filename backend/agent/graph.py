@@ -37,7 +37,7 @@ from langchain_core.messages import (
 from langchain_core.tools import tool as langchain_tool
 from langgraph.graph import StateGraph, START, END
 
-from .llm import get_llm, load_llm_settings, _effective_order, _provider_model
+from .llm import get_llm, load_llm_settings, _effective_order_for_role, _provider_model
 from .nodes import intent_router, context_injector, generation_node
 from .skills_loader import get_skill, list_skills
 from .state import AgentState
@@ -338,23 +338,39 @@ _TOOL_MAP: dict[str, Any] = {t.name: t for t in FINANCE_TOOLS}
 # ---------------------------------------------------------------------------
 
 
-def _get_tool_bound_model(tools: list):
-    """Return the first available provider model with *tools* bound."""
+def _get_model(role: str = "subagent"):
+    """Return the first available provider model for *role*.
+
+    Respects ``{ROLE}_PROVIDER`` env overrides and role-specific model names
+    (e.g. ``SUBAGENT_OPENROUTER_MODEL``).  Raises ``RuntimeError`` if no
+    configured provider is reachable.
+    """
     mode, fallback_order = load_llm_settings()
-    order = _effective_order(mode, fallback_order)
+    order = _effective_order_for_role(mode, fallback_order, role=role)
 
     for provider in order:
-        model = _provider_model(provider)
+        model = _provider_model(provider, role=role)
         if model is not None:
-            logger.info(
-                "Tool-bound LLM: provider=%s tools=%d", provider, len(tools),
-            )
-            return model.bind_tools(tools)
+            logger.info("Model selected: provider=%s role=%s", provider, role)
+            return model
 
     raise RuntimeError(
-        "No LLM provider available for tool-augmented queries. "
+        f"No LLM provider available for role='{role}'. "
         "Configure at least one provider in backend/.env."
     )
+
+
+def _get_tool_bound_model(tools: list, role: str = "subagent"):
+    """Return the first available provider model with *tools* bound.
+
+    Always uses ``role="subagent"`` by default so that the tool-calling node
+    gets the high-reasoning model while the finalizer uses the cheaper agent
+    model.  The full ``FINANCE_TOOLS`` list including ``load_skill`` is always
+    passed through intact.
+    """
+    model = _get_model(role=role)
+    logger.info("Tool-bound LLM: role=%s tools=%d", role, len(tools))
+    return model.bind_tools(tools)
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +429,7 @@ async def route_finance_query(state: AgentState) -> dict:
     The model either makes tool calls (routed to ``execute_tool_calls``) or
     produces a final text answer (routed to ``finalize_response``).
     """
-    model = _get_tool_bound_model(FINANCE_TOOLS)
+    model = _get_tool_bound_model(FINANCE_TOOLS, role="subagent")
     messages = _build_tool_messages(state)
 
     response: AIMessage = await model.ainvoke(messages)
@@ -596,7 +612,7 @@ async def finalize_response(state: AgentState) -> dict:
     synthesis_messages.append(HumanMessage(content=current_user_text))
 
     # --- Stream the final response (captured by SSE endpoint) ---
-    llm = get_llm()
+    llm = get_llm(role="agent")
     full_response = ""
     async for chunk in llm.astream(synthesis_messages):
         if chunk.content:
