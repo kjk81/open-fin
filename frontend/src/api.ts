@@ -320,8 +320,24 @@ export async function streamChat(
         if (text) {
           try {
             const body = JSON.parse(text);
-            if (body.detail) errDetail = String(body.detail);
-            else errDetail = text;
+            if (body.detail) {
+              if (Array.isArray(body.detail)) {
+                // FastAPI/Pydantic validation errors: [{type, loc, msg, ...}, ...]
+                errDetail = body.detail
+                  .map((e: unknown) =>
+                    e && typeof e === "object" && "msg" in e
+                      ? String((e as Record<string, unknown>).msg)
+                      : String(e),
+                  )
+                  .join("; ");
+              } else if (typeof body.detail === "string") {
+                errDetail = body.detail;
+              } else {
+                errDetail = JSON.stringify(body.detail);
+              }
+            } else {
+              errDetail = text;
+            }
           } catch {
             errDetail = text;
           }
@@ -372,7 +388,14 @@ export async function streamChat(
         onDone();
       } else if (event.type === "error") {
         settled = true;
-        onError(event.content ?? "Unknown error", event.detail);
+        const rawErr = event.content;
+        const errContent =
+          typeof rawErr === "string"
+            ? rawErr
+            : rawErr == null
+              ? "Unknown error"
+              : JSON.stringify(rawErr);
+        onError(errContent, event.detail);
       } else if (event.type === "tool_start" && onToolEvent) {
         onToolEvent({ tool: event.tool, status: "running", args: event.args });
       } else if (event.type === "tool_end" && onToolEvent) {

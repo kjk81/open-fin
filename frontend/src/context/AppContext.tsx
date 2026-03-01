@@ -151,7 +151,7 @@ function reducer(state: AppState, action: Action): AppState {
     case "SET_TICKER_REPORT_LOADING":
       return { ...state, tickerReportLoading: action.loading };
     case "SET_TICKER_REPORT_ERROR":
-      return { ...state, tickerReportError: action.error };
+      return { ...state, tickerReportError: action.error != null ? String(action.error) : null };
     case "APPEND_TERMINAL_LOG": {
       const logs = [...state.terminalLogs, action.entry];
       return { ...state, terminalLogs: logs.length > 500 ? logs.slice(logs.length - 500) : logs };
@@ -324,7 +324,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
         streamChat(
           `Give me a concise 3-4 sentence fundamental analysis of ${sym}.`,
-          sessionId.current + "-report",
+          crypto.randomUUID(),
           [sym],
           (token) => {
             if (!reportAbort.signal.aborted)
