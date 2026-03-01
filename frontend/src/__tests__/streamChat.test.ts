@@ -57,9 +57,9 @@ function mockSseResponse(parts: string[]): Response {
 
 function makeCallbacks() {
   return {
-    onToken: vi.fn<[string], void>(),
-    onDone: vi.fn<[], void>(),
-    onError: vi.fn<[string], void>(),
+    onToken: vi.fn<(token: string) => void>(),
+    onDone: vi.fn<() => void>(),
+    onError: vi.fn<(err: string) => void>(),
     onToolEvent: vi.fn(),
     onSources: vi.fn(),
   };

@@ -58,7 +58,7 @@ const mockTicker: TickerInfo = {
   beta: 1.23,
 };
 
-function makeContext(overrides: Partial<Parameters<typeof AppContextModule.useAppContext>[0] extends never ? object : ReturnType<typeof AppContextModule.useAppContext>["state"]> = {}) {
+function makeContext(overrides: Partial<ReturnType<typeof AppContextModule.useAppContext>["state"]> = {}) {
   return {
     state: {
       backendStatus: "running" as const,
