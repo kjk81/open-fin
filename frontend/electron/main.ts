@@ -5,6 +5,11 @@ import * as path from "path";
 import * as fs from "fs";
 import * as http from "http";
 import * as net from "net";
+import log from "electron-log/main";
+
+// Redirect all console.* calls to electron-log (writes to userData/logs/main.log)
+log.initialize();
+Object.assign(console, log.functions);
 
 // ---------------------------------------------------------------------------
 // Path helpers
