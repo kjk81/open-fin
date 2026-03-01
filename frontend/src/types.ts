@@ -22,7 +22,7 @@ export interface PortfolioPosition {
   synced_at: string | null;
 }
 
-export type BackendStatus = "connecting" | "running" | "error";
+export type BackendStatus = "connecting" | "running" | "migration_error" | "error";
 
 export interface ChatMessage {
   id: string;

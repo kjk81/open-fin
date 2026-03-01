@@ -12,6 +12,7 @@ export function TickerDashboard() {
     selectedSymbol,
     tickerReport,
     tickerReportLoading,
+    tickerReportError,
     watchlist,
   } = state;
   const [starring, setStarring] = useState(false);
@@ -77,11 +78,23 @@ export function TickerDashboard() {
               AI Analysis
             </h3>
 
-            {tickerReportLoading && tickerReport === "" && (
+            {tickerReportLoading && tickerReport === "" && !tickerReportError && (
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-muted)", fontSize: "13px" }}>
                 <Spinner />
                 Generating AI analysis...
               </div>
+            )}
+
+            {tickerReportError && !tickerReportLoading && (
+              <div style={{ color: "var(--red)", fontSize: "13px" }}>
+                {tickerReportError}
+              </div>
+            )}
+
+            {!tickerReportLoading && !tickerReportError && !tickerReport && (
+              <p style={{ color: "var(--text-muted)", fontSize: "13px" }}>
+                No analysis available.
+              </p>
             )}
 
             {tickerReport && (

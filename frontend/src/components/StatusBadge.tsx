@@ -3,6 +3,7 @@ import type { BackendStatus } from "../types";
 const CONFIG: Record<BackendStatus, { color: string; label: string }> = {
   connecting: { color: "var(--yellow)", label: "Connecting..." },
   running: { color: "var(--green)", label: "Backend Running" },
+  migration_error: { color: "var(--yellow)", label: "Migration Required" },
   error: { color: "var(--red)", label: "Backend Error" },
 };
 

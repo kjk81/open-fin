@@ -479,6 +479,27 @@ ipcMain.handle("window-close", () => {
   mainWindow?.close();
 });
 
+ipcMain.handle("wipe-user-data", (): { success: boolean; error?: string } => {
+  // Fallback data wipe: directly deletes SQLite DB and FAISS index directory.
+  // Used when the backend REST endpoint is unreachable (e.g. degraded startup).
+  // Does NOT touch .env or Alpaca keys.
+  const { dbPath, faissDir } = userDataPaths();
+  try {
+    if (fs.existsSync(dbPath)) {
+      fs.unlinkSync(dbPath);
+      log.info("wipe-user-data: deleted", dbPath);
+    }
+    if (fs.existsSync(faissDir)) {
+      fs.rmSync(faissDir, { recursive: true, force: true });
+      log.info("wipe-user-data: deleted", faissDir);
+    }
+    return { success: true };
+  } catch (err) {
+    log.error("wipe-user-data failed:", err);
+    return { success: false, error: String(err) };
+  }
+});
+
 // ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
