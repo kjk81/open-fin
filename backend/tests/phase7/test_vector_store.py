@@ -129,11 +129,16 @@ sys.modules["fastembed"] = _fastembed_stub
 from agent.vector_store import (
     FaissManager,
     _EMBED_DIM,
+    _EMBED_MODEL_NAME,
     _IVF_MIN_VECTORS,
+    _META_SCHEMA_VERSION,
     _REBUILD_THRESHOLD,
     _UPSERT_BATCH_SIZE,
     _index_dir,
     _index_path,
+    _is_index_compatible,
+    _read_meta,
+    _write_meta,
 )
 
 
@@ -406,3 +411,127 @@ class TestRebuildBatching:
         manager._rebuild_from_db(db_session)
         assert manager._index is not None
         assert manager._index.ntotal == n
+
+
+# ---------------------------------------------------------------------------
+# Sidecar metadata helpers and index compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestIndexCompatibility:
+    """Unit tests for _is_index_compatible and _write_meta/_read_meta helpers."""
+
+    def test_compatible_returns_true_for_exact_match(self) -> None:
+        meta = {
+            "schema_version": _META_SCHEMA_VERSION,
+            "embed_model": _EMBED_MODEL_NAME,
+            "embed_dim": _EMBED_DIM,
+        }
+        assert _is_index_compatible(meta) is True
+
+    def test_none_meta_returns_false(self) -> None:
+        """Missing sidecar (legacy index) must force rebuild."""
+        assert _is_index_compatible(None) is False
+
+    def test_empty_dict_returns_false(self) -> None:
+        assert _is_index_compatible({}) is False
+
+    def test_wrong_model_name_returns_false(self) -> None:
+        meta = {
+            "schema_version": _META_SCHEMA_VERSION,
+            "embed_model": "wrong/model",
+            "embed_dim": _EMBED_DIM,
+        }
+        assert _is_index_compatible(meta) is False
+
+    def test_wrong_embed_dim_returns_false(self) -> None:
+        meta = {
+            "schema_version": _META_SCHEMA_VERSION,
+            "embed_model": _EMBED_MODEL_NAME,
+            "embed_dim": 9999,
+        }
+        assert _is_index_compatible(meta) is False
+
+    def test_wrong_schema_version_returns_false(self) -> None:
+        meta = {
+            "schema_version": _META_SCHEMA_VERSION + 999,
+            "embed_model": _EMBED_MODEL_NAME,
+            "embed_dim": _EMBED_DIM,
+        }
+        assert _is_index_compatible(meta) is False
+
+
+class TestMetaHelpers:
+    """Write/read/compatibility round-trip for the sidecar meta file."""
+
+    def test_write_then_read_round_trip(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("OPEN_FIN_FAISS_DIR", str(tmp_path))
+        _write_meta(node_count=42)
+        meta = _read_meta()
+        assert meta is not None
+        assert meta["embed_model"] == _EMBED_MODEL_NAME
+        assert meta["embed_dim"] == _EMBED_DIM
+        assert meta["schema_version"] == _META_SCHEMA_VERSION
+        assert meta["node_count"] == 42
+        assert "built_at" in meta
+
+    def test_read_missing_file_returns_none(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("OPEN_FIN_FAISS_DIR", str(tmp_path))
+        # No meta file — _read_meta should return None gracefully
+        meta = _read_meta()
+        assert meta is None
+
+    def test_incompatible_after_write_with_patched_model(self, tmp_path, monkeypatch) -> None:
+        """Simulate an upgrade: old meta has a different model name."""
+        monkeypatch.setenv("OPEN_FIN_FAISS_DIR", str(tmp_path))
+        import json
+        stale_meta = {
+            "schema_version": _META_SCHEMA_VERSION,
+            "embed_model": "old-model/v1",
+            "embed_dim": _EMBED_DIM,
+            "node_count": 10,
+            "built_at": "2025-01-01T00:00:00+00:00",
+        }
+        (tmp_path / "openfin.meta.json").write_text(json.dumps(stale_meta), encoding="utf-8")
+        meta = _read_meta()
+        assert _is_index_compatible(meta) is False
+
+
+class TestLoadOrBuildCompatibilityCheck:
+    """load_or_build must rebuild when the on-disk metadata is incompatible."""
+
+    def test_rebuilds_when_sidecar_has_wrong_model(self, manager, db_with_nodes, tmp_path) -> None:
+        import json
+        # Write stale metadata with a different embed model
+        meta_file = tmp_path / "openfin.meta.json"
+        stale = {
+            "schema_version": _META_SCHEMA_VERSION,
+            "embed_model": "old-model/obsolete",
+            "embed_dim": _EMBED_DIM,
+            "node_count": 3,
+            "built_at": "2025-01-01T00:00:00+00:00",
+        }
+        meta_file.write_text(json.dumps(stale), encoding="utf-8")
+
+        # Also touch the index file so path.exists() == True
+        idx_file = tmp_path / "openfin.index"
+        idx_file.touch()
+
+        manager.load_or_build(db_with_nodes)
+        # After rebuild, sidecar should reflect the correct current model
+        fresh_meta = _read_meta()
+        assert fresh_meta is not None
+        assert fresh_meta["embed_model"] == _EMBED_MODEL_NAME
+        # And the index was successfully built from 3 nodes
+        assert manager._index is not None
+        assert manager._index.ntotal == 3
+
+    def test_rebuilds_when_sidecar_missing(self, manager, db_with_nodes, tmp_path) -> None:
+        """No sidecar file at all forces a rebuild even if index file exists."""
+        # Touch the index file to simulate a legacy index without metadata
+        idx_file = tmp_path / "openfin.index"
+        idx_file.touch()
+        # No meta file written
+        manager.load_or_build(db_with_nodes)
+        assert manager._index is not None
+        assert manager._index.ntotal == 3

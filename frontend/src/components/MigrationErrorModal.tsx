@@ -13,19 +13,31 @@ export function MigrationErrorModal({ error }: Props) {
     setWiping(true);
     setWipeError(null);
 
-    // Try the REST endpoint first; fall back to Electron IPC if available
+    // Try the REST endpoint first; fall back to Electron IPC if available.
+    // Both paths must succeed before we reload — a silent failure here would
+    // land the user back in the same broken state.
     const ok = await wipeData("all");
     if (!ok) {
       try {
-        await window.electronAPI?.wipeUserData?.();
+        const ipcResult = await window.electronAPI?.wipeUserData?.();
+        if (!ipcResult || !ipcResult.success) {
+          setWipeError(
+            ipcResult?.error ??
+              "Failed to reset data. Please delete the Open-Fin data folder manually and restart."
+          );
+          setWiping(false);
+          return;
+        }
       } catch {
-        setWipeError("Failed to reset data. Please delete the Open-Fin data folder manually and restart.");
+        setWipeError(
+          "Failed to reset data. Please delete the Open-Fin data folder manually and restart."
+        );
         setWiping(false);
         return;
       }
     }
 
-    // Reload the app so health polling restarts cleanly
+    // Reload the app so health polling restarts cleanly.
     window.location.reload();
   };
 

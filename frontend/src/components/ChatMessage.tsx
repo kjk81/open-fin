@@ -137,7 +137,12 @@ function MarkdownSegment({
 }) {
   const components = makeComponents(selectTicker);
   return (
-    <ReactMarkdown key={segKey} remarkPlugins={[remarkGfm]} components={components}>
+    <ReactMarkdown
+      key={segKey}
+      remarkPlugins={[remarkGfm]}
+      urlTransform={(url) => url}
+      components={components}
+    >
       {preprocessMentions(text)}
     </ReactMarkdown>
   );

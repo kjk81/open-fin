@@ -12,7 +12,7 @@ load_dotenv(dotenv_path=os.getenv("OPEN_FIN_ENV_PATH"), override=False)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select, text
+from sqlalchemy import func, inspect, select, text
 
 from database import SessionLocal, engine
 from models import Base, KGNode
@@ -63,33 +63,31 @@ async def lifespan(app: FastAPI):
     current_version = get_current_version(engine)
 
     if current_version == 0:
-        # schema_version table was just created by create_all (empty).
-        # Determine if this is a brand-new install or a legacy DB upgrade.
-        try:
-            with engine.connect() as _conn:
-                row_count = _conn.execute(
-                    text("SELECT COUNT(*) FROM schema_version")
-                ).scalar() or 0
-                has_settings = _conn.execute(
-                    text("SELECT COUNT(*) FROM llm_settings")
-                ).scalar() or 0
-        except Exception:
-            row_count = 0
-            has_settings = 0
+        # schema_version table was just created by create_all — its row count
+        # is always 0 here.  Use schema introspection to distinguish a legacy
+        # database (llm_settings table already exists) from a fresh install
+        # (no user-data tables yet).  Row-count heuristics are unreliable
+        # because a new install may already have settings rows.
+        insp = inspect(engine)
+        existing_tables = set(insp.get_table_names())
 
-        if row_count == 0:
-            if has_settings > 0:
-                # Legacy DB — user data exists, start migration from version 0
-                logger.info(
-                    "Legacy database detected (no schema_version row, has user data). "
-                    "Running all migrations from version 0."
-                )
-                set_version(engine, 0)
-            else:
-                # Truly fresh install — skip migrations, schema is already current
-                logger.info("Fresh database — setting schema to current version %d.", CURRENT_SCHEMA_VERSION)
-                set_version(engine, CURRENT_SCHEMA_VERSION)
-                current_version = CURRENT_SCHEMA_VERSION
+        if "llm_settings" in existing_tables:
+            # Existing database — run all migrations from v0 (they are
+            # idempotent and safe to re-apply).
+            logger.info(
+                "Legacy database detected (llm_settings exists, no schema_version row). "
+                "Running all migrations from version 0."
+            )
+            set_version(engine, 0)
+        else:
+            # Truly fresh install — Base.metadata.create_all just created
+            # everything at the latest schema; no migration needed.
+            logger.info(
+                "Fresh database — setting schema to current version %d.",
+                CURRENT_SCHEMA_VERSION,
+            )
+            set_version(engine, CURRENT_SCHEMA_VERSION)
+            current_version = CURRENT_SCHEMA_VERSION
 
     success, error = run_migrations(engine)
     if not success:

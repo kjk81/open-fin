@@ -19,6 +19,7 @@ from tests.conftest import (
 from agent.knowledge_graph import (
     _aupsert_edge,
     _aupsert_node,
+    _AT_CO_MENTION_RE,
     _CO_MENTION_STOPWORDS,
     _DOLLAR_TICKER_RE,
     _BARE_TICKER_RE,
@@ -524,6 +525,67 @@ class TestUpsertTickerSnapshot:
         )
         msft = db_session.query(KGNode).filter(KGNode.name == "MSFT").first()
         assert msft is not None
+
+    def test_co_mention_with_at_prefix(self, patch_db, db_session):
+        """@TICKER in report_text is extracted and stored as a CO_MENTION edge."""
+        set_faiss_manager(None)
+        set_write_queue(None)
+
+        upsert_ticker_snapshot(
+            "AAPL",
+            info=None,
+            report_text="Apple competes with @MSFT in the cloud market.",
+        )
+        msft = db_session.query(KGNode).filter(KGNode.name == "MSFT").first()
+        assert msft is not None
+
+    def test_co_mention_lowercase_at_normalized(self, patch_db, db_session):
+        """Lowercase @-prefix (e.g. @msft) is normalised to MSFT."""
+        set_faiss_manager(None)
+        set_write_queue(None)
+
+        upsert_ticker_snapshot(
+            "AAPL",
+            info=None,
+            report_text="Competing with @msft and @goog.",
+        )
+        msft = db_session.query(KGNode).filter(KGNode.name == "MSFT").first()
+        goog = db_session.query(KGNode).filter(KGNode.name == "GOOG").first()
+        assert msft is not None, "MSFT should be extracted from @msft"
+        assert goog is not None, "GOOG should be extracted from @goog"
+
+    def test_co_mention_prefers_prefixed_over_bare(self, patch_db, db_session):
+        """When @-prefixed tickers are found, bare uppercase in the same text is ignored."""
+        set_faiss_manager(None)
+        set_write_queue(None)
+
+        upsert_ticker_snapshot(
+            "AAPL",
+            info=None,
+            # @MSFT and @AMZN are prefixed; GOOG and NVDA are bare-only
+            report_text="Competes with @MSFT and @AMZN. Also GOOG and NVDA mentioned.",
+        )
+        # Prefixed tickers must be created
+        assert db_session.query(KGNode).filter(KGNode.name == "MSFT").first() is not None
+        assert db_session.query(KGNode).filter(KGNode.name == "AMZN").first() is not None
+        # Bare-only tickers must NOT be created (prefixed path was taken)
+        for bare in ("GOOG", "NVDA"):
+            assert db_session.query(KGNode).filter(KGNode.name == bare).first() is None, (
+                f"{bare} should be ignored when prefixed tickers exist"
+            )
+
+    def test_co_mention_mixed_at_dollar_deduplication(self, patch_db, db_session):
+        """@MSFT and $MSFT in the same report create only one MSFT node."""
+        set_faiss_manager(None)
+        set_write_queue(None)
+
+        upsert_ticker_snapshot(
+            "AAPL",
+            info=None,
+            report_text="Watch @MSFT and $MSFT closely.",
+        )
+        nodes = db_session.query(KGNode).filter(KGNode.name == "MSFT").all()
+        assert len(nodes) == 1, "Duplicate MSFT nodes should be deduplicated"
 
 
 # ---------------------------------------------------------------------------

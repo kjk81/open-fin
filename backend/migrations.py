@@ -101,7 +101,10 @@ def set_version(engine: Engine, version: int) -> None:
             )
         else:
             conn.execute(
-                text("INSERT INTO schema_version (id, version) VALUES (1, :v)"),
+                text(
+                    "INSERT INTO schema_version (id, version, migrated_at) "
+                    "VALUES (1, :v, CURRENT_TIMESTAMP)"
+                ),
                 {"v": version},
             )
 

@@ -23,13 +23,18 @@ class TestExtractTickersAtPrefix:
         result = extract_tickers("How is @RBLX doing today?")
         assert result == ["RBLX"]
 
-    def test_at_ticker_case_sensitive(self) -> None:
+    def test_at_ticker_lowercase_normalized(self) -> None:
         from agent.nodes import extract_tickers
 
-        # Lowercase after @ is not a valid ticker — should not match
+        # Mixed-case @-prefix is now supported; normalised to uppercase
         result = extract_tickers("@rblx")
-        assert "rblx" not in result
-        assert "RBLX" not in result
+        assert result == ["RBLX"]
+
+    def test_at_ticker_uppercase_still_works(self) -> None:
+        from agent.nodes import extract_tickers
+
+        result = extract_tickers("@RBLX")
+        assert result == ["RBLX"]
 
     def test_multiple_at_tickers(self) -> None:
         from agent.nodes import extract_tickers
@@ -196,3 +201,59 @@ class TestExtractTickersEdgeCases:
         # 'F' (Ford) is a real 1-char ticker and not in stopwords
         result = extract_tickers("$F looks cheap")
         assert "F" in result
+
+
+class TestExtractTickersLowercaseNormalization:
+    """Mixed-case @/$ prefixes must all normalise to uppercase."""
+
+    def test_lowercase_at_prefix_normalized(self) -> None:
+        from agent.nodes import extract_tickers
+
+        # Lowercase @-prefix — should normalise to RBLX
+        result = extract_tickers("@rblx")
+        assert result == ["RBLX"]
+
+    def test_mixedcase_at_prefix_normalized(self) -> None:
+        from agent.nodes import extract_tickers
+
+        result = extract_tickers("@RbLx")
+        assert result == ["RBLX"]
+
+    def test_lowercase_dollar_prefix_normalized(self) -> None:
+        from agent.nodes import extract_tickers
+
+        result = extract_tickers("$aapl")
+        assert result == ["AAPL"]
+
+    def test_mixedcase_dollar_prefix_normalized(self) -> None:
+        from agent.nodes import extract_tickers
+
+        result = extract_tickers("$Tsla")
+        assert result == ["TSLA"]
+
+    def test_at_casing_deduplication(self) -> None:
+        """Three casings of the same @-ticker reduce to one result."""
+        from agent.nodes import extract_tickers
+
+        result = extract_tickers("@RBLX @rblx @RblX")
+        assert result == ["RBLX"]
+
+    def test_dollar_casing_deduplication(self) -> None:
+        from agent.nodes import extract_tickers
+
+        result = extract_tickers("$AAPL $aapl $Aapl")
+        assert result == ["AAPL"]
+
+    def test_lowercase_at_then_bare_deduplication(self) -> None:
+        """@rblx → RBLX; subsequent bare RBLX must not produce a second entry."""
+        from agent.nodes import extract_tickers
+
+        result = extract_tickers("@rblx then RBLX")
+        assert result == ["RBLX"]
+
+    def test_at_and_dollar_lowercases_deduplicated(self) -> None:
+        """Same ticker via @lowercase and $lowercase is deduplicated."""
+        from agent.nodes import extract_tickers
+
+        result = extract_tickers("@msft $msft")
+        assert result == ["MSFT"]

@@ -37,9 +37,10 @@ Open-Fin is a local-first financial co-pilot merging real-time market data with 
 3. **Agent Workflow**: User Query → LangGraph → Tools → SSE Response (120 s timeout).
 4. **Security**:
    - `session_id` requires UUID4 format. `context_refs` validated against allow-list + ticker regex.
-   - CORS restricted to `GET`/`POST`/`OPTIONS` with explicit allowed headers.
+   - CORS restricted to `GET`/`POST`/`PUT`/`DELETE`/`OPTIONS` with explicit allowed headers (origins: `localhost:5173` and `app://.`).
    - Co-mention extraction prefers `$`-prefixed tickers (e.g. `$AAPL`); falls back to bare uppercase with extended stopword list.
    - SSRF mitigated via `backend/clients/url_guard.py` (IP-blocklist); imported by `http_base.py` and `sec_filings.py`.
+   - `POST /api/admin/wipe` is localhost-only and gated by `OPEN_FIN_ADMIN_WIPE_ENABLED` env var (default: enabled; set to `false` on shared deployments).
 
 ## Development Standards
 

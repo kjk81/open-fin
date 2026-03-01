@@ -306,6 +306,141 @@ class TestPerformanceKeywordRouting:
         result = await intent_router(state)
         assert result["intent"] == "trade_recommendation"
 
+# ---------------------------------------------------------------------------
+# _should_continue_tools conditional edge
+# ---------------------------------------------------------------------------
+
+
+class TestShouldContinueTools:
+    """Unit tests for the _should_continue_tools conditional edge."""
+
+    def _ai(self, with_tool_calls: bool = False):
+        """Build a lightweight AIMessage with or without tool_calls."""
+        from agent.graph import _should_continue_tools  # noqa: F401 (trigger import)
+        import sys
+        AIMessage = sys.modules["langchain_core.messages"].AIMessage
+        msg = AIMessage(content="some response")
+        if with_tool_calls:
+            msg.tool_calls = [{"name": "get_company_profile", "args": {}, "id": "t1"}]
+        else:
+            msg.tool_calls = []
+        return msg
+
+    def test_routes_force_retry_on_first_no_tool_calls(self) -> None:
+        """No tool calls on the first pass (count==0) routes to force_tool_retry."""
+        from agent.graph import _should_continue_tools
+
+        state = {
+            "messages": [self._ai(with_tool_calls=False)],
+            "tool_call_count": 0,
+            "intent": "ticker_deep_dive",
+            "tickers_mentioned": ["GOOG"],
+        }
+        assert _should_continue_tools(state) == "force_tool_retry"
+
+    def test_finalizes_after_forced_retry_no_tools(self) -> None:
+        """No tool calls after force_tool_retry (count==1) falls through to finalize."""
+        from agent.graph import _should_continue_tools
+
+        state = {
+            "messages": [self._ai(with_tool_calls=False)],
+            "tool_call_count": 1,  # already consumed by force_tool_retry
+            "intent": "ticker_deep_dive",
+        }
+        assert _should_continue_tools(state) == "finalize_response"
+
+    def test_routes_execute_when_tool_calls_present_and_under_limit(self) -> None:
+        from agent.graph import _should_continue_tools
+
+        state = {
+            "messages": [self._ai(with_tool_calls=True)],
+            "tool_call_count": 0,
+        }
+        assert _should_continue_tools(state) == "execute_tool_calls"
+
+    def test_finalizes_at_max_rounds_even_with_tool_calls(self) -> None:
+        from agent.graph import _should_continue_tools, MAX_TOOL_ROUNDS
+
+        state = {
+            "messages": [self._ai(with_tool_calls=True)],
+            "tool_call_count": MAX_TOOL_ROUNDS,
+        }
+        assert _should_continue_tools(state) == "finalize_response"
+
+    def test_finalizes_with_empty_messages_list(self) -> None:
+        """Edge case: no messages at all → falls through to finalize."""
+        from agent.graph import _should_continue_tools
+
+        state: dict = {"messages": [], "tool_call_count": 2}
+        assert _should_continue_tools(state) == "finalize_response"
+
+    def test_force_retry_not_repeated_on_mid_count(self) -> None:
+        """count==2 with no tool calls must finalize, not loop through force_tool_retry."""
+        from agent.graph import _should_continue_tools
+
+        state = {
+            "messages": [self._ai(with_tool_calls=False)],
+            "tool_call_count": 2,
+        }
+        assert _should_continue_tools(state) == "finalize_response"
+
+
+class TestForceToolRetryNode:
+    """Unit tests for the force_tool_retry node function."""
+
+    async def test_appends_system_message(self) -> None:
+        import sys
+        from agent.graph import force_tool_retry
+
+        SystemMessage = sys.modules["langchain_core.messages"].SystemMessage
+
+        state = {
+            "messages": [],
+            "tool_call_count": 0,
+            "tickers_mentioned": ["AAPL"],
+        }
+        result = await force_tool_retry(state)
+        assert "messages" in result
+        assert len(result["messages"]) == 1
+        assert isinstance(result["messages"][0], SystemMessage)
+
+    async def test_sets_tool_call_count_to_1(self) -> None:
+        from agent.graph import force_tool_retry
+
+        state = {"messages": [], "tool_call_count": 0, "tickers_mentioned": []}
+        result = await force_tool_retry(state)
+        assert result["tool_call_count"] == 1
+
+    async def test_includes_ticker_hint_in_directive(self) -> None:
+        from agent.graph import force_tool_retry
+
+        state = {
+            "messages": [],
+            "tool_call_count": 0,
+            "tickers_mentioned": ["TSLA", "NVDA"],
+        }
+        result = await force_tool_retry(state)
+        content = result["messages"][0].content
+        assert "TSLA" in content
+        assert "NVDA" in content
+
+    async def test_no_hint_when_no_tickers(self) -> None:
+        from agent.graph import force_tool_retry
+
+        state = {"messages": [], "tool_call_count": 0, "tickers_mentioned": []}
+        result = await force_tool_retry(state)
+        content = result["messages"][0].content
+        # Generic directive — no ticker-specific mention
+        assert "MANDATORY TOOL USE" in content
+
+    async def test_directive_mentions_live_data(self) -> None:
+        """The directive must reference live/tool use — not training data."""
+        from agent.graph import force_tool_retry
+
+        state = {"messages": [], "tool_call_count": 0, "tickers_mentioned": []}
+        result = await force_tool_retry(state)
+        content = result["messages"][0].content
+        assert "tool" in content.lower() or "TOOL" in content
 
 # ---------------------------------------------------------------------------
 # Conditional edge routing
