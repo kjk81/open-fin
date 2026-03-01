@@ -5,11 +5,12 @@
 }
 
 :root {
-  --bg: #0f172a;
-  --surface: #1e293b;
-  --border: #334155;
-  --text: #e2e8f0;
-  --text-muted: #94a3b8;
+  --bg-app: #09090b;
+  --bg: #18181b;
+  --surface: #27272a;
+  --border: #3f3f46;
+  --text: #f4f4f5;
+  --text-muted: #a1a1aa;
   --accent: #3b82f6;
   --accent-hover: #2563eb;
   --green: #22c55e;
@@ -18,17 +19,21 @@
 }
 
 body {
-  background: var(--bg);
+  background: var(--bg-app);
   color: var(--text);
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.5;
   height: 100vh;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 #root {
   height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ── Animations ────────────────────────────────────────────────────────────── */
@@ -40,6 +45,76 @@ body {
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+
+/* ── Title bar ─────────────────────────────────────────────────────────────── */
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  background: var(--bg-app);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.titlebar-app {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  -webkit-app-region: no-drag;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+}
+
+.titlebar-icon {
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.titlebar-title {
+  color: var(--text-muted);
+}
+
+.titlebar-drag {
+  flex: 1;
+  height: 100%;
+}
+
+.titlebar-controls {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 32px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.titlebar-btn:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.titlebar-btn--close:hover {
+  background: var(--red);
+  color: #fff;
 }
 
 /* ── Tab bar ───────────────────────────────────────────────────────────────── */
@@ -341,7 +416,8 @@ body {
   display: grid;
   grid-template-columns: 260px 1fr 340px;
   grid-template-rows: auto 1fr;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -350,10 +426,9 @@ body {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 10px 20px;
+  padding: 6px 16px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  -webkit-app-region: drag;
+  background: var(--bg);
   user-select: none;
 }
 

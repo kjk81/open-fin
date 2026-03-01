@@ -7,6 +7,9 @@ declare global {
       getWorkerStatus: () => Promise<{ running: boolean }>;
       stopBackend: () => Promise<{ stopped: boolean }>;
       getBackendPort: () => Promise<number>;
+      minimizeWindow: () => Promise<void>;
+      toggleMaximizeWindow: () => Promise<boolean>;
+      closeWindow: () => Promise<void>;
     };
   }
 }
