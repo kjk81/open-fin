@@ -131,6 +131,10 @@ async def intent_router(state: ChatState) -> dict:
         # Queries like "How is @RBLX doing?" or "price of TSLA" must route
         # to the finance tool loop, not fall through to general_chat.
         intent = "ticker_deep_dive"
+    elif any(kw in lower for kw in _PERFORMANCE_KEYWORDS | _DEEP_DIVE_KEYWORDS):
+        # Financial question without explicit ticker — let the tool-calling
+        # LLM identify the entity and fetch live data.
+        intent = "ticker_deep_dive"
     else:
         intent = "general_chat"
 

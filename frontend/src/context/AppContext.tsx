@@ -39,6 +39,8 @@ interface AppState {
   selectedSymbol: string | null;
   terminalLogs: TerminalLogEntry[];
   terminalOpen: boolean;
+  kgLastUpdated: number;
+  debugMode: boolean;
 }
 
 const initialState: AppState = {
@@ -58,6 +60,8 @@ const initialState: AppState = {
   selectedSymbol: null,
   terminalLogs: [],
   terminalOpen: false,
+  kgLastUpdated: 0,
+  debugMode: typeof localStorage !== "undefined" && localStorage.getItem("open-fin-debug-mode") === "true",
 };
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -83,7 +87,9 @@ type Action =
   | { type: "SET_TICKER_REPORT_ERROR"; error: string | null }
   | { type: "APPEND_TERMINAL_LOG"; entry: TerminalLogEntry }
   | { type: "TOGGLE_TERMINAL" }
-  | { type: "CLEAR_TERMINAL_LOGS" };
+  | { type: "CLEAR_TERMINAL_LOGS" }
+  | { type: "KG_UPDATED" }
+  | { type: "SET_DEBUG_MODE"; enabled: boolean };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -154,6 +160,10 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, terminalOpen: !state.terminalOpen };
     case "CLEAR_TERMINAL_LOGS":
       return { ...state, terminalLogs: [] };
+    case "KG_UPDATED":
+      return { ...state, kgLastUpdated: Date.now() };
+    case "SET_DEBUG_MODE":
+      return { ...state, debugMode: action.enabled };
     default:
       return state;
   }
@@ -171,6 +181,7 @@ interface AppContextValue {
   addSystemMessage: (content: string) => Promise<void>;
   toggleTerminal: () => void;
   clearTerminalLogs: () => void;
+  setDebugMode: (enabled: boolean) => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -362,14 +373,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const termLog = useCallback(
-    (type: TerminalLogType, level: TerminalLogLevel, message: string) => {
+    (type: TerminalLogType, level: TerminalLogLevel, message: string, detail?: string) => {
       dispatch({
         type: "APPEND_TERMINAL_LOG",
-        entry: { id: terminalLogIdRef.current++, timestamp: Date.now(), type, level, message },
+        entry: { id: terminalLogIdRef.current++, timestamp: Date.now(), type, level, message, detail },
       });
     },
     []
   );
+
+  const setDebugMode = useCallback((enabled: boolean) => {
+    localStorage.setItem("open-fin-debug-mode", String(enabled));
+    dispatch({ type: "SET_DEBUG_MODE", enabled });
+  }, []);
 
   const sendMessage = useCallback((text: string, contextRefs: string[]) => {
     const userMsg: ChatMessage = {
@@ -408,21 +424,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
         termLog("done", "success", "Pipeline complete.");
       },
-      (err) => {
-        dispatch({ type: "APPEND_TO_LAST_MESSAGE", content: `\n[Error: ${err}]` });
+      (err, detail) => {
+        const displayMsg = state.debugMode && detail ? detail : err;
+        dispatch({ type: "APPEND_TO_LAST_MESSAGE", content: `\n[Error: ${displayMsg}]` });
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
-        termLog("error", "error", err);
+        termLog("error", "error", displayMsg, detail);
       },
       undefined, // signal
       (toolEvent) => {
         dispatch({ type: "UPDATE_TOOL_EVENT", event: toolEvent });
         if (toolEvent.status === "running") {
-          const argsPreview = toolEvent.args
-            ? Object.entries(toolEvent.args)
-                .slice(0, 2)
-                .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-                .join(", ")
-            : "";
+          const argEntries = toolEvent.args ? Object.entries(toolEvent.args) : [];
+          const argsPreview = (state.debugMode ? argEntries : argEntries.slice(0, 2))
+            .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+            .join(", ");
           termLog("tool_start", "info", `Executing ${toolEvent.tool}(${argsPreview})...`);
         } else if (toolEvent.status === "done") {
           const ms = toolEvent.durationMs ? ` in ${toolEvent.durationMs}ms` : "";
@@ -435,11 +450,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "SET_LAST_MESSAGE_SOURCES", sources });
         termLog("sources", "info", `${sources.length} citation(s) attached.`);
       },
+      (_nodesCreated, _edgesCreated) => {
+        dispatch({ type: "KG_UPDATED" });
+        termLog("kg_update", "info", `Graph updated: ${_nodesCreated} node(s), ${_edgesCreated} edge(s).`);
+      },
     );
-  }, [termLog]);
+  }, [termLog, state.debugMode]);
 
   return (
-    <AppContext.Provider value={{ state, selectTicker, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage, toggleTerminal, clearTerminalLogs }}>
+    <AppContext.Provider value={{ state, selectTicker, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage, toggleTerminal, clearTerminalLogs, setDebugMode }}>
       {children}
     </AppContext.Provider>
   );

@@ -272,6 +272,8 @@ class TestChatSSE:
         error_events = [e for e in events if e["type"] == "error"]
         assert len(error_events) == 1
         assert error_events[0]["content"] == "An internal error occurred."
+        assert "detail" in error_events[0]
+        assert "Exception" in error_events[0]["detail"]
 
     async def test_timeout_yields_error_event(self, monkeypatch):
         """When the graph exceeds the timeout, client receives a timeout error."""

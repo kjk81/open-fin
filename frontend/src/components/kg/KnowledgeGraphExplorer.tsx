@@ -3,6 +3,7 @@ import { KGToolbar, type KGView } from "./KGToolbar";
 import { KGNetworkView } from "./KGNetworkView";
 import { KGTableView } from "./KGTableView";
 import { useGraphData } from "./useGraphData";
+import { useAppContext } from "../../context/AppContext";
 import type { NodeKind } from "../../types";
 
 /**
@@ -29,10 +30,19 @@ export function KnowledgeGraphExplorer() {
     resetGraph,
   } = useGraphData();
 
+  const { state: appState } = useAppContext();
+
   // Load summary on mount
   useEffect(() => {
     loadSummary();
   }, [loadSummary]);
+
+  // Auto-refresh summary when KG is updated via chat
+  useEffect(() => {
+    if (appState.kgLastUpdated > 0) {
+      loadSummary();
+    }
+  }, [appState.kgLastUpdated, loadSummary]);
 
   // Keep nodeCount in sync with the graphology instance
   // (graphology is mutable, not reactive, so we track it separately)

@@ -255,4 +255,5 @@ export interface TerminalLogEntry {
   type: TerminalLogType;
   level: TerminalLogLevel;
   message: string;
+  detail?: string;
 }
