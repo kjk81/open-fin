@@ -28,9 +28,10 @@ const LEVEL_CLASSES: Record<TerminalLogEntry["level"], string> = {
 
 interface LogLineProps {
   entry: TerminalLogEntry;
+  debugMode: boolean;
 }
 
-const LogLine = memo(function LogLine({ entry }: LogLineProps) {
+const LogLine = memo(function LogLine({ entry, debugMode }: LogLineProps) {
   const ts = new Date(entry.timestamp).toTimeString().slice(0, 8);
   const prefix = LOG_PREFIX[entry.type];
   const levelClass = LEVEL_CLASSES[entry.level];
@@ -39,7 +40,14 @@ const LogLine = memo(function LogLine({ entry }: LogLineProps) {
     <div className="terminal-log-line">
       <span className="terminal-log-time">[{ts}]</span>
       <span className={`terminal-log-prefix ${levelClass}`}>{prefix}</span>
-      <span className="terminal-log-msg">{entry.message}</span>
+      <span className="terminal-log-msg">
+        {entry.message}
+        {debugMode && entry.detail && entry.detail !== entry.message && (
+          <span style={{ display: "block", opacity: 0.6, fontSize: "0.9em", marginTop: 1 }}>
+            ↳ {entry.detail}
+          </span>
+        )}
+      </span>
     </div>
   );
 });
@@ -97,7 +105,7 @@ export const AgentTerminal = memo(function AgentTerminal() {
         {terminalLogs.length === 0 ? (
           <span className="terminal-empty">No events yet. Send a chat message to see agent logs.</span>
         ) : (
-          terminalLogs.map((entry) => <LogLine key={entry.id} entry={entry} />)
+          terminalLogs.map((entry) => <LogLine key={entry.id} entry={entry} debugMode={state.debugMode} />)
         )}
       </div>
     </div>

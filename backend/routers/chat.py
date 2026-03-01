@@ -189,14 +189,26 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
 
     except asyncio.TimeoutError:
         logger.error("Chat stream timed out after %.0fs.", GRAPH_STREAM_TIMEOUT)
-        yield _sse({"type": "error", "content": "The request timed out. Please try again."})
+        yield _sse({
+            "type": "error",
+            "content": "The request timed out. Please try again.",
+            "detail": f"TimeoutError: Graph stream exceeded {GRAPH_STREAM_TIMEOUT}s",
+        })
     except RuntimeError as exc:
         # No LLM provider configured
         logger.error("Chat stream RuntimeError: %s", exc)
-        yield _sse({"type": "error", "content": "An internal error occurred."})
+        yield _sse({
+            "type": "error",
+            "content": "An internal error occurred.",
+            "detail": f"RuntimeError: {exc}",
+        })
     except Exception as exc:
         logger.error("Chat stream error: %s", exc, exc_info=True)
-        yield _sse({"type": "error", "content": "An internal error occurred."})
+        yield _sse({
+            "type": "error",
+            "content": "An internal error occurred.",
+            "detail": f"{type(exc).__name__}: {exc}",
+        })
 
 
 @router.post("/chat")

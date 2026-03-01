@@ -335,10 +335,30 @@ def _get_tool_bound_model(tools: list, role: str = "subagent"):
     gets the high-reasoning model while the finalizer uses the cheaper agent
     model.  The full ``FINANCE_TOOLS`` list including ``load_skill`` is always
     passed through intact.
+
+    Falls back to ``role="agent"`` if the subagent provider is unavailable,
+    and raises a descriptive ``RuntimeError`` if the resolved model does not
+    support ``.bind_tools()``.
     """
-    model = _get_model(role=role)
+    try:
+        model = _get_model(role=role)
+    except RuntimeError:
+        if role != "agent":
+            logger.warning(
+                "Subagent provider unavailable, falling back to agent role"
+            )
+            model = _get_model(role="agent")
+        else:
+            raise
+
     logger.info("Tool-bound LLM: role=%s tools=%d", role, len(tools))
-    return model.bind_tools(tools)
+
+    try:
+        return model.bind_tools(tools)
+    except (AttributeError, NotImplementedError) as exc:
+        raise RuntimeError(
+            f"LLM provider for role='{role}' does not support tool binding: {exc}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -400,11 +420,22 @@ async def route_finance_query(state: AgentState) -> dict:
     model = _get_tool_bound_model(FINANCE_TOOLS, role="subagent")
     messages = _build_tool_messages(state)
 
-    response: AIMessage = await model.ainvoke(messages)
+    try:
+        response: AIMessage = await model.ainvoke(messages)
+    except Exception as exc:
+        logger.error(
+            "route_finance_query LLM invocation failed: %s", exc, exc_info=True
+        )
+        response = AIMessage(
+            content=(
+                "I encountered an error while analyzing your request: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        )
 
     logger.info(
         "route_finance_query: tool_calls=%d content_len=%d",
-        len(response.tool_calls) if response.tool_calls else 0,
+        len(getattr(response, "tool_calls", None) or []),
         len(response.content) if response.content else 0,
     )
 

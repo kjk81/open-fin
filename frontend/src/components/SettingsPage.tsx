@@ -7,6 +7,7 @@ import {
   updateLlmSettings,
 } from "../api";
 import type { SettingSchema, SettingsValues, LlmProvider, LlmSettings } from "../types";
+import { useAppContext } from "../context/AppContext";
 import { Spinner } from "./Spinner";
 
 // ── Provider labels (migrated from LlmSettingsPanel) ─────────────────────
@@ -64,6 +65,7 @@ interface SettingsPageProps {
 }
 
 export function SettingsPage({ onBack }: SettingsPageProps) {
+  const { state: appState, setDebugMode } = useAppContext();
   // ── Schema + values state ──────────────────────────────────────────────
   const [schema, setSchema] = useState<SettingSchema[]>([]);
   const [values, setValues] = useState<SettingsValues>({});
@@ -130,11 +132,11 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
 
   const categories = useMemo(() => {
     const cats = [...new Set(schema.map((s) => s.category))];
-    // Ensure "LLM Routing" is always the last nav item, whether it arrived
-    // from schema items (4 role-override env vars) or needs to be injected.
+    // Ensure "LLM Routing" comes before "Developer"
     const idx = cats.indexOf("LLM Routing");
     if (idx !== -1) cats.splice(idx, 1);
     cats.push("LLM Routing");
+    cats.push("Developer");
     return cats;
   }, [schema]);
 
@@ -553,6 +555,46 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
                     </div>
                   </div>
                 )}
+              </section>
+            );
+          }
+
+          if (cat === "Developer") {
+            // Show Developer section if search matches or if there's no search
+            if (searchQuery.trim()) {
+              const q = searchQuery.toLowerCase();
+              if (!"developer debug terminal".includes(q)) return null;
+            }
+            return (
+              <section
+                key={cat}
+                id={`settings-cat-${cat}`}
+                ref={(el) => { sectionRefs.current[cat] = el; }}
+              >
+                <h3 className="settings-category-title">Developer</h3>
+                <p className="settings-category-desc">
+                  Advanced settings for debugging and development.
+                </p>
+                <div className="settings-item">
+                  <div className="settings-toggle-row">
+                    <div style={{ flex: 1 }}>
+                      <div className="settings-item-label" style={{ marginBottom: 4 }}>
+                        Debug Terminal
+                      </div>
+                      <div className="settings-item-desc" style={{ marginBottom: 0 }}>
+                        When enabled, the agent terminal shows detailed error information (exception types, stack traces) and full tool call arguments instead of truncated previews.
+                      </div>
+                    </div>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={appState.debugMode}
+                        onChange={(e) => setDebugMode(e.target.checked)}
+                      />
+                      <span className="settings-toggle-slider" />
+                    </label>
+                  </div>
+                </div>
               </section>
             );
           }

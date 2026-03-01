@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { AppProvider, useAppContext } from "./context/AppContext";
 import { AgentTerminal } from "./components/AgentTerminal";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { StatusBadge } from "./components/StatusBadge";
 import { Spinner } from "./components/Spinner";
 import { PortfolioSidebar } from "./components/PortfolioSidebar";
@@ -18,7 +19,9 @@ export default function App() {
   return (
     <AppProvider>
       <TitleBar />
-      <Layout />
+      <ErrorBoundary label="Application">
+        <Layout />
+      </ErrorBoundary>
     </AppProvider>
   );
 }
@@ -130,9 +133,15 @@ function Layout() {
       ) : backendStatus === "migration_error" ? null
       : activeTab === "copilot" ? (
         <>
-          <PortfolioSidebar onOpenSettings={() => setActiveTab("settings")} />
-          <ChatBox />
-          <TickerDashboard />
+          <ErrorBoundary label="Portfolio Sidebar">
+            <PortfolioSidebar onOpenSettings={() => setActiveTab("settings")} />
+          </ErrorBoundary>
+          <ErrorBoundary label="Chat">
+            <ChatBox />
+          </ErrorBoundary>
+          <ErrorBoundary label="Ticker Dashboard">
+            <TickerDashboard />
+          </ErrorBoundary>
           {state.terminalOpen && (
             <div style={{ gridColumn: "1 / -1" }}>
               <AgentTerminal />
@@ -140,7 +149,9 @@ function Layout() {
           )}
         </>
       ) : activeTab === "kg" ? (
-        <KnowledgeGraphExplorer />
+        <ErrorBoundary label="Knowledge Graph">
+          <KnowledgeGraphExplorer />
+        </ErrorBoundary>
       ) : activeTab === "settings" ? (
         <SettingsPage onBack={() => setActiveTab("copilot")} />
       ) : (

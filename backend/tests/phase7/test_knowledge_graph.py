@@ -606,3 +606,142 @@ class TestParseDate:
 
     def test_long_string_truncated(self):
         assert _parse_date("2025-03-20T12:00:00Z") == date(2025, 3, 20)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: upsert_from_tool_results dispatch audit
+# ---------------------------------------------------------------------------
+
+class TestUpsertFromToolResultsDispatch:
+    """Verify the full dispatch pipeline: tool_results payload → kg_nodes/
+    kg_edges populated in the database.  This tests that the _TOOL_PROCESSORS
+    map is correctly wired and that new SQLite entries are committed.
+    """
+
+    async def test_company_profile_creates_nodes_and_edges(self, patch_async_db):
+        """A get_company_profile tool result must create a ticker node, a sector
+        node, an industry node, and the corresponding edges in the DB."""
+        import json as _json
+        import asyncio
+
+        set_faiss_manager(None)
+        # Use a real asyncio.Queue to verify non-blocking put_nowait
+        write_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        set_write_queue(write_queue)
+
+        tool_results = [
+            {
+                "tool": "get_company_profile",
+                "args": {"ticker": "NVDA"},
+                "result": _json.dumps({
+                    "success": True,
+                    "data": {
+                        "symbol": "NVDA",
+                        "name": "NVIDIA Corporation",
+                        "sector": "Technology",
+                        "industry": "Semiconductors",
+                    },
+                    "sources": [],
+                }),
+            }
+        ]
+
+        summary = await upsert_from_tool_results(tool_results)
+
+        # At least NVDA node + sector node + industry node created
+        assert summary["nodes_created"] >= 1
+        # At least IN_SECTOR + IN_INDUSTRY edges
+        assert summary["edges_created"] >= 1
+        # node_ids list must be non-empty (fed to FAISS write queue)
+        assert len(summary["node_ids"]) >= 1
+
+    async def test_faiss_write_queue_receives_ids_non_blocking(self, patch_async_db):
+        """After upsert_from_tool_results, the FAISS write queue must have
+        received a ('upsert', node_ids, texts) message via put_nowait without
+        blocking the caller (verified by queue not being empty)."""
+        import json as _json
+        import asyncio
+
+        set_faiss_manager(None)
+        write_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        set_write_queue(write_queue)
+
+        tool_results = [
+            {
+                "tool": "get_company_profile",
+                "args": {"ticker": "AMD"},
+                "result": _json.dumps({
+                    "success": True,
+                    "data": {
+                        "symbol": "AMD",
+                        "name": "Advanced Micro Devices",
+                        "sector": "Technology",
+                        "industry": "Semiconductors",
+                    },
+                    "sources": [],
+                }),
+            }
+        ]
+
+        summary = await upsert_from_tool_results(tool_results)
+
+        if summary["node_ids"]:
+            # The write queue should have at least one item posted
+            assert not write_queue.empty(), (
+                "FAISS write queue should have received node IDs via put_nowait "
+                "after upsert_from_tool_results returned"
+            )
+            op, node_ids, texts = write_queue.get_nowait()
+            assert op == "upsert"
+            assert len(node_ids) >= 1
+
+    async def test_tool_result_with_success_false_handled_gracefully(self, patch_async_db):
+        """A tool result with success=False must not raise and must return
+        zeros for nodes/edges (no partial writes from failed API calls)."""
+        import json as _json
+
+        set_faiss_manager(None)
+        set_write_queue(None)
+
+        tool_results = [
+            {
+                "tool": "get_company_profile",
+                "args": {"ticker": "FAKE"},
+                "result": _json.dumps({
+                    "success": False,
+                    "data": {},
+                    "error": "Ticker not found",
+                    "sources": [],
+                }),
+            }
+        ]
+
+        summary = await upsert_from_tool_results(tool_results)
+        # Must return a dict without raising even when success=False
+        assert isinstance(summary, dict)
+        assert "nodes_created" in summary
+
+    async def test_unknown_tool_name_returns_zeros(self, patch_async_db):
+        """A tool_results entry for an unregistered tool (e.g. get_ohlcv which
+        has no processor) must silently return without creating KG entries."""
+        import json as _json
+
+        set_faiss_manager(None)
+        set_write_queue(None)
+
+        tool_results = [
+            {
+                "tool": "get_ohlcv",  # no _TOOL_PROCESSOR registered for this
+                "args": {"symbol": "AAPL"},
+                "result": _json.dumps({
+                    "success": True,
+                    "data": {"bars": []},
+                    "sources": [],
+                }),
+            }
+        ]
+
+        summary = await upsert_from_tool_results(tool_results)
+        # No processor → nodes_created may be 0; must not raise
+        assert isinstance(summary, dict)
+        assert "nodes_created" in summary

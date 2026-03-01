@@ -299,10 +299,11 @@ export async function streamChat(
   contextRefs: string[],
   onToken: (token: string) => void,
   onDone: () => void,
-  onError: (err: string) => void,
+  onError: (err: string, detail?: string) => void,
   signal?: AbortSignal,
   onToolEvent?: (event: import("./types").ToolEvent) => void,
   onSources?: (sources: import("./types").SourceRef[]) => void,
+  onKgUpdate?: (nodesCreated: number, edgesCreated: number) => void,
 ): Promise<void> {
   let res: Response;
   try {
@@ -312,6 +313,25 @@ export async function streamChat(
       body: JSON.stringify({ message, session_id: sessionId, context_refs: contextRefs }),
       signal,
     });
+    if (!res.ok) {
+      let errDetail = `HTTP ${res.status}`;
+      try {
+        const text = await res.text();
+        if (text) {
+          try {
+            const body = JSON.parse(text);
+            if (body.detail) errDetail = String(body.detail);
+            else errDetail = text;
+          } catch {
+            errDetail = text;
+          }
+        }
+      } catch {
+        // failed to read text
+      }
+      onError(errDetail);
+      return;
+    }
   } catch (e) {
     if ((e as Error).name === "AbortError") return;
     onError(String(e));
@@ -341,7 +361,7 @@ export async function streamChat(
         onDone();
       } else if (event.type === "error") {
         settled = true;
-        onError(event.content ?? "Unknown error");
+        onError(event.content ?? "Unknown error", event.detail);
       } else if (event.type === "tool_start" && onToolEvent) {
         onToolEvent({ tool: event.tool, status: "running", args: event.args });
       } else if (event.type === "tool_end" && onToolEvent) {
@@ -352,6 +372,8 @@ export async function streamChat(
         });
       } else if (event.type === "sources" && onSources) {
         onSources(event.sources ?? []);
+      } else if (event.type === "kg_update" && onKgUpdate) {
+        onKgUpdate(event.nodes_created ?? 0, event.edges_created ?? 0);
       }
     } catch {
       // ignore malformed JSON

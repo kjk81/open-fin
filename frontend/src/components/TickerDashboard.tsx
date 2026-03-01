@@ -92,8 +92,8 @@ export function TickerDashboard() {
             )}
 
             {!tickerReportLoading && !tickerReportError && !tickerReport && (
-              <p style={{ color: "var(--text-muted)", fontSize: "13px" }}>
-                No analysis available.
+              <p style={{ color: "var(--red)", fontSize: "13px" }}>
+                No analysis available. Please verify your LLM API key configuration and ensure sufficient data payload is loaded.
               </p>
             )}
 

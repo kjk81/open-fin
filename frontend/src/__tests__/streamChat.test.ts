@@ -43,12 +43,16 @@ function mockStreamResponse(chunks: Uint8Array[]): Response {
       }
     },
   });
-  return new Response(stream, { status: 200 });
+  const res = new Response(stream, { status: 200, statusText: "OK" });
+  Object.defineProperty(res, 'ok', { value: true });
+  return res;
 }
 
 /** Convenience: make a Response from an array of SSE strings */
 function mockSseResponse(parts: string[]): Response {
-  return mockStreamResponse(parts.map(enc));
+  const res = mockStreamResponse(parts.map(enc));
+  Object.defineProperty(res, 'ok', { value: true });
+  return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +139,7 @@ describe("streamChat", () => {
     await streamChat("hi", "s1", [], onToken, onDone, onError);
 
     expect(onToken).toHaveBeenCalledWith("before");
-    expect(onError).toHaveBeenCalledWith("Something went wrong");
+    expect(onError).toHaveBeenCalledWith("Something went wrong", undefined);
     expect(onDone).not.toHaveBeenCalled();
   });
 
@@ -147,7 +151,7 @@ describe("streamChat", () => {
 
     await streamChat("hi", "s1", [], vi.fn(), onDone, onError);
 
-    expect(onError).toHaveBeenCalledWith("Unknown error");
+    expect(onError).toHaveBeenCalledWith("Unknown error", undefined);
     expect(onDone).not.toHaveBeenCalled();
   });
 
@@ -172,7 +176,7 @@ describe("streamChat", () => {
 
     await streamChat("hi", "s1", [], vi.fn(), onDone, onError);
 
-    expect(onError).toHaveBeenCalledWith("timeout");
+    expect(onError).toHaveBeenCalledWith("timeout", undefined);
     expect(onDone).not.toHaveBeenCalled();
   });
 
@@ -188,9 +192,25 @@ describe("streamChat", () => {
     expect(onDone).not.toHaveBeenCalled();
   });
 
+  it("calls onError and returns when fetch returns a non-OK status", async () => {
+    const { onDone, onError } = makeCallbacks();
+    const errorResponse = new Response(JSON.stringify({ detail: "API Key missing" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+    vi.mocked(fetch).mockResolvedValue(errorResponse);
+
+    await streamChat("hi", "s1", [], vi.fn(), onDone, onError);
+
+    expect(onError).toHaveBeenCalledWith("API Key missing");
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
   it("calls onError when res.body is null", async () => {
     const { onDone, onError } = makeCallbacks();
-    vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const res = new Response(null, { status: 200, statusText: "OK" });
+    Object.defineProperty(res, 'ok', { value: true });
+    vi.mocked(fetch).mockResolvedValue(res);
 
     await streamChat("hi", "s1", [], vi.fn(), onDone, onError);
 
@@ -211,7 +231,9 @@ describe("streamChat", () => {
         }
       },
     });
-    vi.mocked(fetch).mockResolvedValue(new Response(stream, { status: 200 }));
+    const res = new Response(stream, { status: 200, statusText: "OK" });
+    Object.defineProperty(res, 'ok', { value: true });
+    vi.mocked(fetch).mockResolvedValue(res);
 
     await streamChat("hi", "s1", [], vi.fn(), onDone, onError);
 
@@ -241,7 +263,9 @@ describe("streamChat", () => {
         throw err;
       },
     });
-    vi.mocked(fetch).mockResolvedValue(new Response(stream, { status: 200 }));
+    const res = new Response(stream, { status: 200, statusText: "OK" });
+    Object.defineProperty(res, 'ok', { value: true });
+    vi.mocked(fetch).mockResolvedValue(res);
 
     await streamChat("hi", "s1", [], vi.fn(), onDone, onError);
 
@@ -443,7 +467,7 @@ describe("streamChat", () => {
 
     await streamChat("hi", "s1", [], vi.fn(), onDone, onError);
 
-    expect(onError).toHaveBeenCalledWith("oops");
+    expect(onError).toHaveBeenCalledWith("oops", undefined);
     expect(onDone).not.toHaveBeenCalled();
   });
 
@@ -519,4 +543,74 @@ describe("streamChat", () => {
       }),
     );
   });
+
+  // ── 16. SSE error event with detail field (Issue 5 — missing API key) ────
+
+  it("passes the detail field from an SSE error event to onError", async () => {
+    // Regression test for Issue 5: the backend now includes a 'detail' field
+    // on SSE error events carrying the full exception type and message.
+    // The frontend must forward this as the second argument to onError so the
+    // AppContext can surface it in debug mode / to the user.
+    const { onToken, onDone, onError } = makeCallbacks();
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        sseData({
+          type: "error",
+          content: "An internal error occurred.",
+          detail: "RuntimeError: No LLM provider available for role='agent'.",
+        }),
+      ]),
+    );
+
+    await streamChat("hi", "s1", [], onToken, onDone, onError);
+
+    expect(onError).toHaveBeenCalledWith(
+      "An internal error occurred.",
+      "RuntimeError: No LLM provider available for role='agent'.",
+    );
+    expect(onDone).not.toHaveBeenCalled();
+    expect(onToken).not.toHaveBeenCalled();
+  });
+
+  it("passes detail for a timeout error event from the backend", async () => {
+    // When the graph exceeds GRAPH_STREAM_TIMEOUT, the backend emits an SSE
+    // error event with 'timed out' in content and 'TimeoutError' in detail.
+    const { onDone, onError } = makeCallbacks();
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        sseData({
+          type: "error",
+          content: "Request timed out after 120 s.",
+          detail: "TimeoutError: graph.astream_events exceeded 120 s timeout",
+        }),
+      ]),
+    );
+
+    await streamChat("slow query", "s1", [], vi.fn(), onDone, onError);
+
+    expect(onError).toHaveBeenCalledWith(
+      "Request timed out after 120 s.",
+      "TimeoutError: graph.astream_events exceeded 120 s timeout",
+    );
+  });
+
+  it("treats missing API key error (401 HTTP) as onError — not onDone", async () => {
+    // If the LLM provider returns 401 (API key invalid), the backend should
+    // surface this as a RuntimeError SSE event. At the HTTP level, the chat
+    // endpoint itself returns 200 (SSE stream started). This test covers the
+    // HTTP non-OK path where the response returns 401 before SSE begins.
+    const { onDone, onError } = makeCallbacks();
+    const errorBody = JSON.stringify({ detail: "API key invalid or missing" });
+    const res = new Response(errorBody, {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+    vi.mocked(fetch).mockResolvedValue(res);
+
+    await streamChat("analyse TSLA", "s1", ["TSLA"], vi.fn(), onDone, onError);
+
+    expect(onError).toHaveBeenCalledWith("API key invalid or missing");
+    expect(onDone).not.toHaveBeenCalled();
+  });
 });
+
