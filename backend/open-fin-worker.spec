@@ -29,6 +29,11 @@ a = Analysis(
         # --- SQLAlchemy dialect ---
         "sqlalchemy.dialects.sqlite",
         "aiosqlite",
+        # --- Greenlet (required by SQLAlchemy async engine) ---
+        "greenlet",
+        # --- Pydantic v2 core (C-extension, not auto-detected) ---
+        "pydantic_core",
+        "pydantic_core._pydantic_core",
         # --- Scheduling ---
         "apscheduler",
         "apscheduler.schedulers.blocking",

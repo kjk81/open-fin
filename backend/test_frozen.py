@@ -27,6 +27,12 @@ from pathlib import Path
 
 import httpx
 
+# Ensure stdout can handle any Unicode — Windows CI runners default to cp1252
+# which cannot encode replacement characters (\ufffd) that appear when the
+# subprocess emits bytes that aren't valid UTF-8.
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 BACKEND_DIR = Path(__file__).resolve().parent
 DEFAULT_PORT = 8000
 STARTUP_TIMEOUT = 90   # seconds to wait for /api/health to respond
