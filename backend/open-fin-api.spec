@@ -95,6 +95,7 @@ a = Analysis(
         "routers.llm",
         "routers.loadouts",
         "routers.portfolio",
+        "routers.settings",
         "routers.ticker",
         "routers.trade",
         "routers.watchlist",

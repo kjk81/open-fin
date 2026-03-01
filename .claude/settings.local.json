@@ -14,7 +14,8 @@
       "Bash(npx tsc --noEmit)",
       "Bash(npm install --save graphology graphology-types sigma @react-sigma/core @react-sigma/layout-forceatlas2 @tanstack/react-table @tanstack/react-virtual)",
       "Bash(python -c \"from routers.graph import router; print\\(''graph router OK''\\)\")",
-      "Bash(python -c \"import main; print\\(''main.py OK''\\)\")"
+      "Bash(python -c \"import main; print\\(''main.py OK''\\)\")",
+      "Bash(find \"c:/Users/kjk/antiod/web/open-fin/backend\" -name \"*.py\" -type f -exec grep -l \"hidden.*import\\\\|collect_all\\\\|collect_data_files\" {} ;)"
     ],
     "additionalDirectories": [
       "c:\\Users\\kjk\\.claude\\projects\\c--Users-kjk-antiod-web-open-fin\\memory"
