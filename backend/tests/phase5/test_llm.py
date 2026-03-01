@@ -53,25 +53,28 @@ class TestLoadLlmSettings:
 
         with patch("agent.llm.SessionLocal", return_value=mock_db):
             from agent.llm import load_llm_settings
-            mode, order = load_llm_settings()
+            mode, order, sub_order = load_llm_settings()
 
         assert mode == "cloud"
         assert len(order) > 0
+        assert sub_order is None
 
     def test_reads_from_db(self):
         import json
         mock_row = MagicMock()
         mock_row.mode = "ollama"
         mock_row.fallback_order_json = json.dumps(["ollama", "openai"])
+        mock_row.subagent_fallback_order_json = None
 
         mock_db = MagicMock()
         mock_db.query.return_value.first.return_value = mock_row
 
         with patch("agent.llm.SessionLocal", return_value=mock_db):
             from agent.llm import load_llm_settings
-            mode, order = load_llm_settings()
+            mode, order, sub_order = load_llm_settings()
 
         assert mode == "ollama"
+        assert sub_order is None
 
 
 class TestValidateProviderOrder:

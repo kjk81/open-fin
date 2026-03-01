@@ -1,0 +1,352 @@
+"""Unit tests for prompt generation and intent routing.
+
+Validates:
+- get_router_soul_prompt() includes current date, Finneas identity, and
+  strict tool-enforcement language.
+- intent_router correctly handles @TICKER / $TICKER prefixes.
+- Performance-keyword queries with tickers route to ticker_deep_dive.
+- Conditional edge functions route finance intents correctly.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Prompt content tests
+# ---------------------------------------------------------------------------
+
+
+class TestRouterSoulPrompt:
+    def test_includes_current_date(self) -> None:
+        from agent.prompts import get_router_soul_prompt
+
+        prompt = get_router_soul_prompt()
+        today = datetime.now().strftime("%B %d, %Y")
+        assert today in prompt, f"Expected '{today}' in router prompt"
+
+    def test_includes_day_of_week(self) -> None:
+        from agent.prompts import get_router_soul_prompt
+
+        prompt = get_router_soul_prompt()
+        today_full = datetime.now().strftime("%A, %B %d, %Y")
+        assert today_full in prompt
+
+    def test_includes_finneas_identity(self) -> None:
+        from agent.prompts import get_router_soul_prompt
+
+        prompt = get_router_soul_prompt()
+        assert "Finneas" in prompt
+
+    def test_includes_tool_enforcement_never_answer(self) -> None:
+        from agent.prompts import get_router_soul_prompt
+
+        prompt = get_router_soul_prompt()
+        # The enforcement block must forbid answering from training data
+        assert "MUST NEVER" in prompt or "NEVER answer" in prompt
+
+    def test_includes_stale_training_data_warning(self) -> None:
+        from agent.prompts import get_router_soul_prompt
+
+        prompt = get_router_soul_prompt()
+        assert "STALE" in prompt
+
+    def test_includes_single_call_policy(self) -> None:
+        from agent.prompts import get_router_soul_prompt
+
+        prompt = get_router_soul_prompt()
+        assert "SINGLE-CALL POLICY" in prompt
+
+    def test_includes_skills_advertisement(self) -> None:
+        from agent.prompts import get_router_soul_prompt
+
+        prompt = get_router_soul_prompt()
+        assert "load_skill" in prompt
+
+    def test_includes_entity_recognition_hint(self) -> None:
+        from agent.prompts import get_router_soul_prompt
+
+        prompt = get_router_soul_prompt()
+        # Must guide the model to treat @/$ prefixes as tickers
+        assert "@TICKER" in prompt or "@ mention" in prompt.lower() or "@" in prompt
+
+    def test_is_non_empty_string(self) -> None:
+        from agent.prompts import get_router_soul_prompt
+
+        prompt = get_router_soul_prompt()
+        assert isinstance(prompt, str)
+        assert len(prompt) > 500
+
+
+class TestFinalizePrompt:
+    def test_includes_current_date(self) -> None:
+        from agent.prompts import get_finalize_prompt
+
+        prompt = get_finalize_prompt()
+        today = datetime.now().strftime("%B %d, %Y")
+        assert today in prompt
+
+    def test_includes_finneas_identity(self) -> None:
+        from agent.prompts import get_finalize_prompt
+
+        prompt = get_finalize_prompt()
+        assert "Finneas" in prompt
+
+    def test_includes_synthesis_instruction(self) -> None:
+        from agent.prompts import get_finalize_prompt
+
+        prompt = get_finalize_prompt()
+        assert "Synthesise" in prompt or "synthesise" in prompt.lower()
+
+    def test_is_non_empty_string(self) -> None:
+        from agent.prompts import get_finalize_prompt
+
+        prompt = get_finalize_prompt()
+        assert isinstance(prompt, str)
+        assert len(prompt) > 200
+
+
+class TestGenerationPrompt:
+    def test_includes_current_date(self) -> None:
+        from agent.prompts import get_generation_prompt
+
+        prompt = get_generation_prompt()
+        today = datetime.now().strftime("%B %d, %Y")
+        assert today in prompt
+
+    def test_includes_finneas_identity(self) -> None:
+        from agent.prompts import get_generation_prompt
+
+        prompt = get_generation_prompt()
+        assert "Finneas" in prompt
+
+    def test_is_non_empty_string(self) -> None:
+        from agent.prompts import get_generation_prompt
+
+        prompt = get_generation_prompt()
+        assert isinstance(prompt, str)
+        assert len(prompt) > 200
+
+
+# ---------------------------------------------------------------------------
+# IntentRouter with @ and $ prefixes
+# ---------------------------------------------------------------------------
+
+
+class TestIntentRouterPrefixes:
+    """Verify that @TICKER and $TICKER mentions are correctly extracted."""
+
+    async def test_at_prefix_extracted(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="What do you think about @RBLX?")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert "RBLX" in result["tickers_mentioned"]
+
+    async def test_dollar_prefix_extracted(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="Is $NVDA a good buy right now?")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert "NVDA" in result["tickers_mentioned"]
+
+    async def test_at_rblx_not_unknown(self) -> None:
+        """Core regression test: @RBLX must not be dropped as an unknown entity."""
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="How did @RBLX perform recently?")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        # Must be extracted exactly as RBLX (no @ prefix, no empty string)
+        assert "RBLX" in result["tickers_mentioned"]
+        assert "@RBLX" not in result["tickers_mentioned"]
+
+    async def test_mixed_prefixes_all_extracted(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="Compare @RBLX $AAPL and TSLA")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        for ticker in ("RBLX", "AAPL", "TSLA"):
+            assert ticker in result["tickers_mentioned"], (
+                f"{ticker} not found in {result['tickers_mentioned']}"
+            )
+
+    async def test_no_duplicates_from_mixed_prefixes(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="@AAPL $AAPL AAPL three times")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert result["tickers_mentioned"].count("AAPL") == 1
+
+
+# ---------------------------------------------------------------------------
+# Performance keyword routing
+# ---------------------------------------------------------------------------
+
+
+class TestPerformanceKeywordRouting:
+    """Queries about price / performance with tickers must route to tools."""
+
+    async def test_how_is_doing_routes_to_deep_dive(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="How is @RBLX doing today?")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert result["intent"] == "ticker_deep_dive"
+        assert "RBLX" in result["tickers_mentioned"]
+
+    async def test_price_query_routes_to_deep_dive(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="What is the current price of TSLA?")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert result["intent"] == "ticker_deep_dive"
+
+    async def test_performance_keyword_routes_to_deep_dive(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="What's the performance of $NVDA this week?")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert result["intent"] == "ticker_deep_dive"
+
+    async def test_trend_keyword_routes_to_deep_dive(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="AAPL trend this month")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert result["intent"] == "ticker_deep_dive"
+
+    async def test_no_ticker_performance_stays_general(self) -> None:
+        """Performance keywords alone (no tickers) must not force deep_dive."""
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [HumanMessage(content="How is the market doing today?")],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert result["intent"] == "general_chat"
+
+    async def test_explicit_deep_dive_keywords_take_priority(self) -> None:
+        """Explicit deep-dive words must take priority over performance catch."""
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [
+                HumanMessage(content="Give me a deep dive analysis on $AAPL price")
+            ],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert result["intent"] == "ticker_deep_dive"
+
+    async def test_trade_intent_takes_priority_over_performance(self) -> None:
+        """Trade keywords must take priority over performance keywords."""
+        from langchain_core.messages import HumanMessage
+
+        from agent.nodes import intent_router
+
+        state = {
+            "messages": [
+                HumanMessage(content="Should I buy @RBLX today given the price?")
+            ],
+            "context_refs": [],
+        }
+        result = await intent_router(state)
+        assert result["intent"] == "trade_recommendation"
+
+
+# ---------------------------------------------------------------------------
+# Conditional edge routing
+# ---------------------------------------------------------------------------
+
+
+class TestRouteAfterContext:
+    """_route_after_context should send finance intents to the tool loop."""
+
+    def test_trade_recommendation_routes_to_finance(self) -> None:
+        from agent.graph import _route_after_context
+
+        state: dict = {"intent": "trade_recommendation"}
+        assert _route_after_context(state) == "route_finance_query"
+
+    def test_ticker_deep_dive_routes_to_finance(self) -> None:
+        from agent.graph import _route_after_context
+
+        state: dict = {"intent": "ticker_deep_dive"}
+        assert _route_after_context(state) == "route_finance_query"
+
+    def test_stock_screening_routes_to_finance(self) -> None:
+        from agent.graph import _route_after_context
+
+        state: dict = {"intent": "stock_screening"}
+        assert _route_after_context(state) == "route_finance_query"
+
+    def test_sec_filings_routes_to_finance(self) -> None:
+        from agent.graph import _route_after_context
+
+        state: dict = {"intent": "sec_filings"}
+        assert _route_after_context(state) == "route_finance_query"
+
+    def test_general_chat_routes_to_generation(self) -> None:
+        from agent.graph import _route_after_context
+
+        state: dict = {"intent": "general_chat"}
+        assert _route_after_context(state) == "generation_node"
+
+    def test_missing_intent_defaults_to_generation(self) -> None:
+        from agent.graph import _route_after_context
+
+        state: dict = {}
+        assert _route_after_context(state) == "generation_node"

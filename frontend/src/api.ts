@@ -92,15 +92,23 @@ export async function fetchLlmSettings(): Promise<LlmSettings> {
 export async function updateLlmSettings(
   mode: "cloud" | "ollama",
   fallbackOrder: LlmProvider[],
+  subagentFallbackOrder?: LlmProvider[] | null,
 ): Promise<LlmSettings> {
+  const body: Record<string, unknown> = {
+    mode,
+    fallback_order: fallbackOrder,
+  };
+  if (subagentFallbackOrder && subagentFallbackOrder.length > 0) {
+    body.subagent_fallback_order = subagentFallbackOrder;
+  }
   const res = await fetch(`${API}/api/llm/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode, fallback_order: fallbackOrder }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error((body as { detail?: string }).detail ?? `LLM settings update failed: ${res.status}`);
+    const b = await res.json().catch(() => ({}));
+    throw new Error((b as { detail?: string }).detail ?? `LLM settings update failed: ${res.status}`);
   }
   return res.json();
 }
@@ -291,6 +299,37 @@ export async function streamChat(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  // Track whether onDone or onError was called so we can guarantee one fires.
+  let settled = false;
+
+  const parseAndDispatchSseEvent = (part: string) => {
+    const match = part.match(/^data:\s*(.+)$/m);
+    if (!match) return;
+    try {
+      const event = JSON.parse(match[1]);
+      if (event.type === "token") {
+        onToken(event.content);
+      } else if (event.type === "done") {
+        settled = true;
+        onDone();
+      } else if (event.type === "error") {
+        settled = true;
+        onError(event.content ?? "Unknown error");
+      } else if (event.type === "tool_start" && onToolEvent) {
+        onToolEvent({ tool: event.tool, status: "running", args: event.args });
+      } else if (event.type === "tool_end" && onToolEvent) {
+        onToolEvent({
+          tool: event.tool,
+          status: event.success === false ? "error" : "done",
+          durationMs: event.duration_ms,
+        });
+      } else if (event.type === "sources" && onSources) {
+        onSources(event.sources ?? []);
+      }
+    } catch {
+      // ignore malformed JSON
+    }
+  };
 
   try {
     while (true) {
@@ -298,37 +337,28 @@ export async function streamChat(
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      // SSE lines are separated by "\n\n"
+      // SSE messages are separated by "\n\n"
       const parts = buffer.split("\n\n");
       buffer = parts.pop() ?? "";
 
       for (const part of parts) {
-        const match = part.match(/^data:\s*(.+)$/m);
-        if (!match) continue;
-        try {
-          const event = JSON.parse(match[1]);
-          if (event.type === "token") onToken(event.content);
-          else if (event.type === "done") onDone();
-          else if (event.type === "error") onError(event.content ?? "Unknown error");
-          else if (event.type === "tool_start" && onToolEvent) {
-            onToolEvent({ tool: event.tool, status: "running", args: event.args });
-          } else if (event.type === "tool_end" && onToolEvent) {
-            onToolEvent({
-              tool: event.tool,
-              status: event.success === false ? "error" : "done",
-              durationMs: event.duration_ms,
-            });
-          } else if (event.type === "sources" && onSources) {
-            onSources(event.sources ?? []);
-          }
-        } catch {
-          // ignore malformed JSON
-        }
+        parseAndDispatchSseEvent(part);
       }
     }
+
+    // Flush any remaining content in buffer that arrived without a trailing "\n\n"
+    if (buffer.trim()) {
+      parseAndDispatchSseEvent(buffer);
+    }
   } catch (e) {
-    if ((e as Error).name !== "AbortError") onError(String(e));
+    if ((e as Error).name !== "AbortError") {
+      settled = true;
+      onError(String(e));
+    }
   } finally {
     reader.releaseLock();
+    // Safety net: if the stream ended without emitting done or error
+    // (e.g. network drop, server crash), resolve the loading state.
+    if (!settled) onDone();
   }
 }

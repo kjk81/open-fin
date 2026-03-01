@@ -72,26 +72,28 @@ function Layout() {
             Loadouts
           </button>
         </nav>
-        <SettingsGearButton onClick={() => setActiveTab("settings")} />
-        <button
-          onClick={toggleTerminal}
-          title="Toggle agent terminal (Ctrl+`)"
-          style={{
-            background: state.terminalOpen ? "var(--accent)" : "transparent",
-            border: "1px solid var(--border)",
-            borderRadius: "4px",
-            color: state.terminalOpen ? "#fff" : "var(--text-muted)",
-            padding: "3px 8px",
-            fontSize: "11px",
-            fontFamily: "monospace",
-            cursor: "pointer",
-            WebkitAppRegion: "no-drag",
-          } as React.CSSProperties}
-        >
-          &gt;_ Terminal
-        </button>
-        <WorkerStatusBadge online={workerOnline} />
-        <StatusBadge status={backendStatus} />
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginLeft: "auto" }}>
+          <WorkerStatusBadge online={workerOnline} />
+          <StatusBadge status={backendStatus} />
+          <button
+            onClick={toggleTerminal}
+            title="Toggle agent terminal (Ctrl+`)"
+            style={{
+              background: state.terminalOpen ? "var(--accent)" : "transparent",
+              border: "1px solid var(--border)",
+              borderRadius: "4px",
+              color: state.terminalOpen ? "#fff" : "var(--text-muted)",
+              padding: "3px 8px",
+              fontSize: "11px",
+              fontFamily: "monospace",
+              cursor: "pointer",
+              WebkitAppRegion: "no-drag",
+            } as React.CSSProperties}
+          >
+            &gt;_ Terminal
+          </button>
+          <SettingsGearButton onClick={() => setActiveTab("settings")} />
+        </div>
       </header>
 
       {/* Connecting overlay */}

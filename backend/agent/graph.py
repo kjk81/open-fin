@@ -39,6 +39,7 @@ from langgraph.graph import StateGraph, START, END
 
 from .llm import get_llm, load_llm_settings, _effective_order_for_role, _provider_model
 from .nodes import intent_router, context_injector, generation_node
+from .prompts import get_finalize_prompt, get_router_soul_prompt
 from .skills_loader import get_skill, list_skills
 from .state import AgentState
 
@@ -57,42 +58,9 @@ _FINANCE_INTENTS: frozenset[str] = frozenset({
     "sec_filings",
 })
 
-# ---------------------------------------------------------------------------
-# System prompts
-# ---------------------------------------------------------------------------
-
-_ROUTER_SYSTEM_PROMPT = (
-    "You are Open-Fin, an expert financial AI co-pilot with access to "
-    "real-time market data and SEC filing research tools.\n\n"
-    "SINGLE-CALL POLICY — CRITICAL:\n"
-    "Gather ALL required financial data in ONE parallel tool-call block "
-    "whenever possible.  For example, when analyzing a stock, call "
-    "get_company_profile, get_financial_statements, get_technical_snapshot, "
-    "and get_balance_sheet simultaneously in a single response — do NOT "
-    "call them one at a time.\n\n"
-    "Only request additional tool calls if earlier results reveal new "
-    "questions that could not have been anticipated (e.g. a peer comparison "
-    "after discovering the sector).  Keep the total number of tool-call "
-    "rounds to an absolute minimum.\n\n"
-    "SKILLS — Reusable Analytical Playbooks:\n"
-    "You have access to a `load_skill` tool that loads structured, step-by-step "
-    "analytical playbooks (e.g. 'dcf_analysis').  When a user request aligns "
-    "with an available skill, call `load_skill` to retrieve its instructions "
-    "and then follow them precisely.  Each skill may only be executed once "
-    "per session.\n\n"
-    "When you have gathered sufficient data, respond with your analysis "
-    "WITHOUT making further tool calls.  The response should be a brief "
-    "signal to indicate readiness — the final user-facing answer will be "
-    "synthesised in a later step."
-)
-
-_FINALIZE_SYSTEM_PROMPT = (
-    "You are Open-Fin, an expert financial AI co-pilot.  Synthesise the "
-    "research data below into a clear, data-driven answer for the user.  "
-    "Be concise, precise and professional.  Cite specific numbers from the "
-    "tool results.  Always clarify that your responses are informational "
-    "and not financial advice."
-)
+# System prompts are now generated dynamically by agent/prompts.py.
+# get_router_soul_prompt() and get_finalize_prompt() inject the current date
+# and embed the Finneas SOUL personality on every call.
 
 # ---------------------------------------------------------------------------
 # LangChain tool wrappers
@@ -381,7 +349,7 @@ def _get_tool_bound_model(tools: list, role: str = "subagent"):
 def _build_tool_messages(state: AgentState) -> list[BaseMessage]:
     """System prompt + full state-message replay for ``route_finance_query``."""
 
-    parts: list[str] = [_ROUTER_SYSTEM_PROMPT]
+    parts: list[str] = [get_router_soul_prompt()]
 
     injected = state.get("injected_context", "")
     if injected:
@@ -555,7 +523,7 @@ async def finalize_response(state: AgentState) -> dict:
                 break
 
     # --- Build the synthesis prompt with all accumulated context ---
-    ctx_parts: list[str] = [_FINALIZE_SYSTEM_PROMPT]
+    ctx_parts: list[str] = [get_finalize_prompt()]
 
     injected = state.get("injected_context", "")
     if injected:

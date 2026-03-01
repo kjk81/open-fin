@@ -80,7 +80,7 @@ export function TickerDashboard() {
             {tickerReportLoading && tickerReport === "" && (
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-muted)", fontSize: "13px" }}>
                 <Spinner />
-                Checking report cache...
+                Generating AI analysis...
               </div>
             )}
 

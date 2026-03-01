@@ -80,7 +80,9 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
   const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null);
   const [llmMode, setLlmMode] = useState<"cloud" | "ollama">("cloud");
   const [llmOrder, setLlmOrder] = useState<LlmProvider[]>([]);
+  const [llmSubagentOrder, setLlmSubagentOrder] = useState<LlmProvider[] | null>(null);
   const [dragging, setDragging] = useState<LlmProvider | null>(null);
+  const [draggingSubagent, setDraggingSubagent] = useState<LlmProvider | null>(null);
   const [advancedModelMode, setAdvancedModelMode] = useState(false);
 
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
@@ -104,6 +106,7 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
         setLlmSettings(llmData);
         setLlmMode(llmData.mode);
         setLlmOrder(llmData.fallback_order);
+        setLlmSubagentOrder(llmData.subagent_fallback_order ?? null);
         // Initialise advanced model toggle from persisted .env state
         setAdvancedModelMode(
           Boolean(valuesData["SUBAGENT_PROVIDER"]?.is_set || valuesData["SUBAGENT_MODEL"]?.is_set)
@@ -159,8 +162,12 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
   const llmDirty = useMemo(() => {
     if (!llmSettings) return false;
     if (llmMode !== llmSettings.mode) return true;
-    return llmOrder.join("|") !== llmSettings.fallback_order.join("|");
-  }, [llmMode, llmOrder, llmSettings]);
+    if (llmOrder.join("|") !== llmSettings.fallback_order.join("|")) return true;
+    const savedSub = llmSettings.subagent_fallback_order ?? null;
+    if (savedSub === null && llmSubagentOrder === null) return false;
+    if (savedSub === null || llmSubagentOrder === null) return true;
+    return llmSubagentOrder.join("|") !== savedSub.join("|");
+  }, [llmMode, llmOrder, llmSubagentOrder, llmSettings]);
 
   const envDirty = Object.keys(edits).length > 0;
   const dirty = envDirty || llmDirty;
@@ -209,6 +216,20 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
     });
   }, []);
 
+  const moveSubagentProvider = useCallback((from: LlmProvider, to: LlmProvider) => {
+    if (from === to) return;
+    setLlmSubagentOrder((prev) => {
+      if (!prev) return prev;
+      const next = [...prev];
+      const fromIdx = next.indexOf(from);
+      const toIdx = next.indexOf(to);
+      if (fromIdx === -1 || toIdx === -1) return prev;
+      next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, from);
+      return next;
+    });
+  }, []);
+
   const handleSave = async () => {
     setSaving(true);
     setError(null);
@@ -224,10 +245,11 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
       }
       // Save LLM routing if changed
       if (llmDirty) {
-        const saved = await updateLlmSettings(llmMode, llmOrder);
+        const saved = await updateLlmSettings(llmMode, llmOrder, llmSubagentOrder);
         setLlmSettings(saved);
         setLlmMode(saved.mode);
         setLlmOrder(saved.fallback_order);
+        setLlmSubagentOrder(saved.subagent_fallback_order ?? null);
       }
       // Reload values from server
       const freshValues = await fetchSettings();
@@ -249,6 +271,7 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
     if (llmSettings) {
       setLlmMode(llmSettings.mode);
       setLlmOrder(llmSettings.fallback_order);
+      setLlmSubagentOrder(llmSettings.subagent_fallback_order ?? null);
     }
     setAdvancedModelMode(
       Boolean(values["SUBAGENT_PROVIDER"]?.is_set || values["SUBAGENT_MODEL"]?.is_set)
@@ -258,9 +281,13 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
 
   const handleAdvancedToggle = () => {
     if (advancedModelMode) {
-      // Switching back to simple mode: clear subagent overrides
+      // Switching back to simple mode: clear subagent overrides and separate order
       handleEditChange("SUBAGENT_PROVIDER", "");
       handleEditChange("SUBAGENT_MODEL", "");
+      setLlmSubagentOrder(null);
+    } else {
+      // Switching ON: seed subagent order from current agent order
+      setLlmSubagentOrder(llmOrder.slice());
     }
     setAdvancedModelMode((prev) => !prev);
   };
@@ -460,11 +487,13 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
                   </div>
                 </div>
 
-                {/* Fallback order */}
+                {/* Fallback order — agent (or shared when not in advanced mode) */}
                 <div className="settings-item">
-                  <div className="settings-item-label">Fallback Order</div>
+                  <div className="settings-item-label">
+                    {advancedModelMode ? "Agent Fallback Order" : "Fallback Order"}
+                  </div>
                   <div className="settings-item-desc">
-                    Drag providers to reorder. The agent will try each provider in order until one succeeds.
+                    Drag providers to reorder. The {advancedModelMode ? "agent" : "AI"} will try each in order until one succeeds.
                   </div>
                   <div className="settings-provider-list">
                     {llmOrder.map((provider, idx) => (
@@ -493,6 +522,37 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
                     </p>
                   )}
                 </div>
+
+                {/* Subagent fallback order — only visible in advanced mode */}
+                {advancedModelMode && llmSubagentOrder && (
+                  <div className="settings-item">
+                    <div className="settings-item-label">Subagent Fallback Order</div>
+                    <div className="settings-item-desc">
+                      Drag providers to set an independent fallback chain for the Subagent (tool-use / deep analysis) role.
+                    </div>
+                    <div className="settings-provider-list">
+                      {llmSubagentOrder.map((provider, idx) => (
+                        <div
+                          key={provider}
+                          className="settings-provider-item"
+                          draggable
+                          onDragStart={() => setDraggingSubagent(provider)}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={() => {
+                            if (!draggingSubagent) return;
+                            moveSubagentProvider(draggingSubagent, provider);
+                            setDraggingSubagent(null);
+                          }}
+                          onDragEnd={() => setDraggingSubagent(null)}
+                        >
+                          <span className="settings-drag-handle">⋮⋮</span>
+                          <span className="settings-provider-rank">{idx + 1}</span>
+                          <span>{providerLabel[provider] ?? provider}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </section>
             );
           }

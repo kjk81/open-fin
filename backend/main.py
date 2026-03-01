@@ -35,6 +35,16 @@ async def lifespan(app: FastAPI):
 
     logger.info("Creating database tables...")
     Base.metadata.create_all(bind=engine)
+
+    # Add subagent_fallback_order_json column to existing DBs (safe ALTER TABLE)
+    from sqlalchemy import inspect, text
+    _insp = inspect(engine)
+    _cols = [c["name"] for c in _insp.get_columns("llm_settings")]
+    if "subagent_fallback_order_json" not in _cols:
+        with engine.begin() as _conn:
+            _conn.execute(text("ALTER TABLE llm_settings ADD COLUMN subagent_fallback_order_json TEXT"))
+        logger.info("Migrated llm_settings: added subagent_fallback_order_json column")
+
     ensure_default_settings()
 
     logger.info("Syncing Alpaca portfolio...")

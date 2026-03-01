@@ -33,6 +33,15 @@ DEFAULT_FALLBACK_ORDER: list[str] = [
     "ollama",
 ]
 
+# Role-specific model defaults: (provider, role) -> default model name.
+# Falls back to the provider's global default when no entry matches.
+_ROLE_DEFAULTS: dict[tuple[str, str], str] = {
+    ("ollama", "agent"): "qwen3:4b-instruct",
+    ("ollama", "subagent"): "deepseek-r1:7b",
+    ("openrouter", "subagent"): "arcee-ai/trinity-large-preview",
+    ("groq", "subagent"): "openai/gpt-oss-120b",
+}
+
 
 def _normalize_order(order: list[str]) -> list[str]:
     normalized: list[str] = []
@@ -53,12 +62,19 @@ def _normalize_order(order: list[str]) -> list[str]:
     return normalized
 
 
-def load_llm_settings() -> tuple[str, list[str]]:
+def load_llm_settings() -> tuple[str, list[str], list[str] | None]:
+    """Load mode, agent fallback order, and optional subagent fallback order from DB.
+
+    Returns:
+        (mode, agent_fallback_order, subagent_fallback_order)
+        ``subagent_fallback_order`` is ``None`` when no separate order has been
+        configured — the agent order should be used for both roles in that case.
+    """
     db = SessionLocal()
     try:
         row: LLMSettings | None = db.query(LLMSettings).first()
         if not row:
-            return "cloud", DEFAULT_FALLBACK_ORDER.copy()
+            return "cloud", DEFAULT_FALLBACK_ORDER.copy(), None
 
         mode = (row.mode or "cloud").lower().strip()
         if mode not in {"cloud", "ollama"}:
@@ -73,7 +89,20 @@ def load_llm_settings() -> tuple[str, list[str]]:
             parsed = []
 
         parsed_order = [str(item) for item in parsed]
-        return mode, _normalize_order(parsed_order or DEFAULT_FALLBACK_ORDER.copy())
+        agent_order = _normalize_order(parsed_order or DEFAULT_FALLBACK_ORDER.copy())
+
+        # Parse optional subagent fallback order
+        subagent_order: list[str] | None = None
+        sub_json = getattr(row, "subagent_fallback_order_json", None)
+        if sub_json:
+            try:
+                sub_parsed = json.loads(sub_json)
+            except json.JSONDecodeError:
+                sub_parsed = []
+            if isinstance(sub_parsed, list) and sub_parsed:
+                subagent_order = _normalize_order([str(item) for item in sub_parsed])
+
+        return mode, agent_order, subagent_order
     finally:
         db.close()
 
@@ -85,15 +114,20 @@ def validate_provider_order(order: list[str]) -> list[str]:
 
 
 def settings_payload() -> dict:
-    mode, fallback_order = load_llm_settings()
+    mode, fallback_order, subagent_order = load_llm_settings()
     payload: dict = {
         "mode": mode,
         "providers": list(PROVIDERS),
         "fallback_order": fallback_order,
     }
+    if subagent_order is not None:
+        payload["subagent_fallback_order"] = subagent_order
+
     # Report which provider/model each role resolves to (informational)
     for role in ("agent", "subagent"):
-        order = _effective_order_for_role(mode, fallback_order, role=role)
+        order = _effective_order_for_role(
+            mode, fallback_order, role=role, subagent_order=subagent_order
+        )
         for provider in order:
             cfg = _provider_config(provider, role=role)
             if cfg is not None:
@@ -103,12 +137,17 @@ def settings_payload() -> dict:
     return payload
 
 
-def persist_settings(mode: str, fallback_order: list[str]) -> dict:
+def persist_settings(
+    mode: str,
+    fallback_order: list[str],
+    subagent_fallback_order: list[str] | None = None,
+) -> dict:
     normalized_mode = (mode or "").lower().strip()
     if normalized_mode not in {"cloud", "ollama"}:
         raise ValueError("mode must be one of: cloud, ollama")
 
     normalized_order = validate_provider_order(fallback_order)
+    normalized_sub = validate_provider_order(subagent_fallback_order) if subagent_fallback_order else None
 
     db = SessionLocal()
     try:
@@ -117,20 +156,25 @@ def persist_settings(mode: str, fallback_order: list[str]) -> dict:
             row = LLMSettings(
                 mode=normalized_mode,
                 fallback_order_json=json.dumps(normalized_order),
+                subagent_fallback_order_json=json.dumps(normalized_sub) if normalized_sub else None,
                 updated_at=datetime.utcnow(),
             )
             db.add(row)
         else:
             row.mode = normalized_mode
             row.fallback_order_json = json.dumps(normalized_order)
+            row.subagent_fallback_order_json = json.dumps(normalized_sub) if normalized_sub else None
             row.updated_at = datetime.utcnow()
 
         db.commit()
-        return {
+        result: dict = {
             "mode": normalized_mode,
             "providers": list(PROVIDERS),
             "fallback_order": normalized_order,
         }
+        if normalized_sub:
+            result["subagent_fallback_order"] = normalized_sub
+        return result
     except Exception:
         db.rollback()
         raise
@@ -171,8 +215,9 @@ def _provider_config(provider: str, role: str | None = None) -> _ProviderConfig 
 
     When *role* is ``"agent"`` or ``"subagent"``, the function checks for
     role-prefixed env vars first (e.g. ``AGENT_OPENROUTER_MODEL``) and falls
-    back to the global var (e.g. ``OPENROUTER_MODEL``).  API keys and base URLs
-    are always shared between roles.
+    back to the global var (e.g. ``OPENROUTER_MODEL``).  If no env var is set,
+    a role-specific default from ``_ROLE_DEFAULTS`` is used before the
+    provider-level default.  API keys and base URLs are always shared.
     """
     provider_name = provider.lower().strip()
     role_prefix = f"{role.upper()}_" if role else ""
@@ -180,11 +225,12 @@ def _provider_config(provider: str, role: str | None = None) -> _ProviderConfig 
     def _model(role_var: str, global_var: str, default: str) -> str:
         # Check generic {ROLE}_MODEL first (e.g. AGENT_MODEL / SUBAGENT_MODEL),
         # then the per-provider role override (e.g. AGENT_OPENROUTER_MODEL),
-        # then the global per-provider var, then the compiled-in default.
+        # then the global per-provider var, then the role-specific (or global) default.
+        role_default = _ROLE_DEFAULTS.get((provider_name, role), default) if role else default
         return (
             os.getenv(f"{role_prefix}MODEL")
             or os.getenv(f"{role_prefix}{role_var}")
-            or os.getenv(global_var, default)
+            or os.getenv(global_var, role_default)
         )
 
     if provider_name == "ollama":
@@ -321,24 +367,25 @@ def _effective_order_for_role(
     mode: str,
     configured_order: list[str],
     role: str | None = None,
+    subagent_order: list[str] | None = None,
 ) -> list[str]:
-    """Like :func:`_effective_order` but respects ``{ROLE}_PROVIDER`` env overrides.
+    """Like :func:`_effective_order` but respects ``{ROLE}_PROVIDER`` env overrides
+    and the optional per-role subagent fallback order.
 
-    If ``AGENT_PROVIDER`` or ``SUBAGENT_PROVIDER`` is set, the fallback order
-    for that role is collapsed to just that single provider.  This allows
-    operators to pin the subagent to a high-reasoning model while the agent
-    uses a cheaper fallback chain, or vice-versa.
-
-    Example ``.env``::
-
-        SUBAGENT_PROVIDER=openrouter
-        AGENT_PROVIDER=groq
+    Priority (highest to lowest):
+    1. ``{ROLE}_PROVIDER`` env var — collapses to a single provider
+    2. ``subagent_order`` (when role == "subagent" and order is set)
+    3. Shared ``configured_order``
     """
     if role:
         forced = os.getenv(f"{role.upper()}_PROVIDER", "").strip().lower()
         if forced and forced in PROVIDERS:
             logger.info("Role '%s' forced to provider '%s'", role, forced)
             return [forced]
+
+    if role == "subagent" and subagent_order:
+        return _effective_order(mode, subagent_order)
+
     return _effective_order(mode, configured_order)
 
 
@@ -348,10 +395,13 @@ class FallbackLLM:
         mode: str,
         fallback_order: list[str],
         role: str | None = None,
+        subagent_order: list[str] | None = None,
     ) -> None:
         self.mode = (mode or "cloud").lower().strip()
         self.role = role
-        self.fallback_order = _effective_order_for_role(self.mode, fallback_order, role=role)
+        self.fallback_order = _effective_order_for_role(
+            self.mode, fallback_order, role=role, subagent_order=subagent_order
+        )
 
     async def ainvoke(self, messages: list[BaseMessage]):
         last_error: Exception | None = None
@@ -432,5 +482,10 @@ def get_llm(role: str | None = None) -> FallbackLLM:
               ``"subagent"`` (tool calling, high-reasoning model).
               ``None`` preserves the original behaviour — global settings only.
     """
-    mode, fallback_order = load_llm_settings()
-    return FallbackLLM(mode=mode, fallback_order=fallback_order, role=role)
+    mode, fallback_order, subagent_order = load_llm_settings()
+    return FallbackLLM(
+        mode=mode,
+        fallback_order=fallback_order,
+        role=role,
+        subagent_order=subagent_order,
+    )
