@@ -8,20 +8,21 @@ from tools._utils import build_timing, html_to_markdown, now_utc, STRIP_TAGS
 
 
 class TestNowUtc:
-    def test_returns_naive_datetime(self):
+    def test_returns_aware_datetime(self):
         result = now_utc()
-        assert result.tzinfo is None
+        assert result.tzinfo is not None
+        assert result.tzinfo == timezone.utc
 
     def test_is_approximately_utc(self):
-        before = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+        before = datetime.now(tz=timezone.utc)
         result = now_utc()
-        after = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+        after = datetime.now(tz=timezone.utc)
         assert before <= result <= after
 
 
 class TestBuildTiming:
     def test_returns_tool_timing(self):
-        t0 = datetime(2025, 1, 1, 12, 0, 0)
+        t0 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         timing = build_timing("my_tool", t0)
         assert timing.tool_name == "my_tool"
         assert timing.duration_ms >= 0

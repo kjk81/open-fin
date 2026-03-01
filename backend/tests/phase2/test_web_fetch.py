@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import httpx
@@ -45,7 +45,7 @@ def _make_cache_row(*, url: str, html: str, ttl: int = 900, age_minutes: int = 0
     row.url = url
     row.response_text = html
     row.ttl_seconds = ttl
-    row.fetched_at = datetime.utcnow() - timedelta(minutes=age_minutes)
+    row.fetched_at = datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
     return row
 
 

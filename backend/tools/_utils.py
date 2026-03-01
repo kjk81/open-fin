@@ -14,7 +14,7 @@ _STRIP_TAGS = STRIP_TAGS
 
 
 def now_utc() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    return datetime.now(tz=timezone.utc)
 
 
 def build_timing(tool_name: str, started_at: datetime) -> ToolTiming:

@@ -28,7 +28,7 @@ import asyncio
 import json
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -114,7 +114,7 @@ def _upsert_node(
             merged = json.loads(existing.metadata_json or "{}")
             merged.update(metadata)
             existing.metadata_json = json.dumps(merged)
-        existing.updated_at = datetime.utcnow()
+        existing.updated_at = datetime.now(timezone.utc)
         db.flush()
         return existing.id
 
@@ -122,7 +122,7 @@ def _upsert_node(
         node_type=node_type,
         name=name,
         metadata_json=json.dumps(metadata or {}),
-        updated_at=datetime.utcnow(),
+        updated_at=datetime.now(timezone.utc),
     )
     db.add(node)
     db.flush()  # populate node.id without committing the transaction
@@ -172,14 +172,14 @@ async def _aupsert_node(
             merged = json.loads(existing.metadata_json or "{}")
             merged.update(metadata)
             existing.metadata_json = json.dumps(merged)
-        existing.updated_at = datetime.utcnow()
+        existing.updated_at = datetime.now(timezone.utc)
         return existing.id, False
 
     node = KGNode(
         node_type=node_type,
         name=name,
         metadata_json=json.dumps(metadata or {}),
-        updated_at=datetime.utcnow(),
+        updated_at=datetime.now(timezone.utc),
     )
     session.add(node)
     await session.flush()  # populate node.id without committing
@@ -544,7 +544,7 @@ async def _proc_web_documents(
                 url=url,
                 title=title,
                 snippet=src.get("snippet"),
-                fetched_at=datetime.utcnow(),
+                fetched_at=datetime.now(timezone.utc),
             )
         except Exception:
             continue

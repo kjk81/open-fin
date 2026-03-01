@@ -16,7 +16,7 @@ from agent.graph import graph
 from agent.knowledge_graph import upsert_from_tool_results
 from database import SessionLocal
 from models import ChatHistory
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -241,7 +241,7 @@ def chat_system_event(request: SystemEventRequest):
             session_id=request.session_id,
             role="system",
             content=request.content,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         ))
         db.commit()
         return {"ok": True}

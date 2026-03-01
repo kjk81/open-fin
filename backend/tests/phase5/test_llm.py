@@ -89,7 +89,7 @@ class TestFallbackLLM:
 
         call_log = []
 
-        def mock_provider_model(provider):
+        def mock_provider_model(provider: str, role: str | None = None):
             model = AsyncMock()
             if provider == "openai":
                 model.ainvoke = AsyncMock(side_effect=RuntimeError("OpenAI down"))
