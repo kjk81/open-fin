@@ -84,6 +84,7 @@ export interface LlmSettings {
   mode: "cloud" | "ollama";
   providers: LlmProvider[];
   fallback_order: LlmProvider[];
+  subagent_fallback_order?: LlmProvider[];
   /** Resolved provider/model for each role (informational, returned by backend). */
   agent_provider?: string;
   agent_model?: string;

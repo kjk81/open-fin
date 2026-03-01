@@ -92,15 +92,23 @@ export async function fetchLlmSettings(): Promise<LlmSettings> {
 export async function updateLlmSettings(
   mode: "cloud" | "ollama",
   fallbackOrder: LlmProvider[],
+  subagentFallbackOrder?: LlmProvider[] | null,
 ): Promise<LlmSettings> {
+  const body: Record<string, unknown> = {
+    mode,
+    fallback_order: fallbackOrder,
+  };
+  if (subagentFallbackOrder && subagentFallbackOrder.length > 0) {
+    body.subagent_fallback_order = subagentFallbackOrder;
+  }
   const res = await fetch(`${API}/api/llm/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode, fallback_order: fallbackOrder }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error((body as { detail?: string }).detail ?? `LLM settings update failed: ${res.status}`);
+    const b = await res.json().catch(() => ({}));
+    throw new Error((b as { detail?: string }).detail ?? `LLM settings update failed: ${res.status}`);
   }
   return res.json();
 }

@@ -48,6 +48,7 @@ class LLMSettings(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     mode: Mapped[str] = mapped_column(String(20), default="cloud")
     fallback_order_json: Mapped[str] = mapped_column(Text)
+    subagent_fallback_order_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

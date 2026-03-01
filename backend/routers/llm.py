@@ -11,6 +11,7 @@ router = APIRouter()
 class LLMSettingsUpdateRequest(BaseModel):
     mode: str = Field(..., min_length=1, max_length=20)
     fallback_order: list[str] = Field(..., min_length=1)
+    subagent_fallback_order: list[str] | None = Field(default=None)
 
 
 @router.get("/llm/settings")
@@ -21,6 +22,10 @@ def get_llm_settings():
 @router.put("/llm/settings")
 def update_llm_settings(request: LLMSettingsUpdateRequest):
     try:
-        return persist_settings(mode=request.mode, fallback_order=request.fallback_order)
+        return persist_settings(
+            mode=request.mode,
+            fallback_order=request.fallback_order,
+            subagent_fallback_order=request.subagent_fallback_order,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
