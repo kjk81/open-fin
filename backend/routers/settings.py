@@ -151,6 +151,37 @@ SETTINGS_SCHEMA: list[dict[str, Any]] = [
         "type": "string",
         "category": "LLM Providers",
     },
+    # ── Model Configuration (agent / subagent role overrides) ────────────
+    {
+        "key": "AGENT_PROVIDER",
+        "label": "Agent Provider",
+        "description": "Force the Agent (Orchestrator) to a specific provider for routing and response synthesis. Overrides global fallback order.",
+        "type": "select",
+        "options": ["openrouter", "gemini", "openai", "groq", "huggingface", "ollama"],
+        "category": "LLM Routing",
+    },
+    {
+        "key": "AGENT_MODEL",
+        "label": "Agent Model",
+        "description": "Model name for the Agent (Orchestrator). Overrides the provider default for routing and prose synthesis (e.g. gpt-4o-mini).",
+        "type": "string",
+        "category": "LLM Routing",
+    },
+    {
+        "key": "SUBAGENT_PROVIDER",
+        "label": "Subagent Provider",
+        "description": "Force the Subagent (Analyst) to a specific provider for tool use and deep reasoning. Falls back to Agent config when unset.",
+        "type": "select",
+        "options": ["openrouter", "gemini", "openai", "groq", "huggingface", "ollama"],
+        "category": "LLM Routing",
+    },
+    {
+        "key": "SUBAGENT_MODEL",
+        "label": "Subagent Model",
+        "description": "Model name for the Subagent (Analyst). Use a high-reasoning model here for best tool-calling performance (e.g. anthropic/claude-3.5-sonnet).",
+        "type": "string",
+        "category": "LLM Routing",
+    },
     # ── Data Sources ─────────────────────────────────────────────────────
     {
         "key": "FMP_API_KEY",

@@ -178,8 +178,12 @@ def _provider_config(provider: str, role: str | None = None) -> _ProviderConfig 
     role_prefix = f"{role.upper()}_" if role else ""
 
     def _model(role_var: str, global_var: str, default: str) -> str:
+        # Check generic {ROLE}_MODEL first (e.g. AGENT_MODEL / SUBAGENT_MODEL),
+        # then the per-provider role override (e.g. AGENT_OPENROUTER_MODEL),
+        # then the global per-provider var, then the compiled-in default.
         return (
-            os.getenv(f"{role_prefix}{role_var}")
+            os.getenv(f"{role_prefix}MODEL")
+            or os.getenv(f"{role_prefix}{role_var}")
             or os.getenv(global_var, default)
         )
 
