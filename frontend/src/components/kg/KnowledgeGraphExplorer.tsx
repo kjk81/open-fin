@@ -37,12 +37,6 @@ export function KnowledgeGraphExplorer() {
     loadSummary();
   }, [loadSummary]);
 
-  // Auto-refresh summary when KG is updated via chat
-  useEffect(() => {
-    if (appState.kgLastUpdated > 0) {
-      loadSummary();
-    }
-  }, [appState.kgLastUpdated, loadSummary]);
 
   // Keep nodeCount in sync with the graphology instance
   // (graphology is mutable, not reactive, so we track it separately)
@@ -60,6 +54,16 @@ export function KnowledgeGraphExplorer() {
     },
     [loadEgo, refreshNodeCount],
   );
+
+  // Auto-refresh summary and auto-load ego when KG is updated via analysis
+  useEffect(() => {
+    if (appState.kgLastUpdated > 0) {
+      loadSummary();
+      if (appState.kgLastTicker) {
+        handleLoadEgo(appState.kgLastTicker, 2);
+      }
+    }
+  }, [appState.kgLastUpdated, loadSummary, handleLoadEgo]);
 
   const handleNodeClick = useCallback(
     (nodeId: string) => {

@@ -99,7 +99,7 @@ export function useGraphData(): GraphDataState & GraphDataActions {
   );
 
   const resetGraph = useCallback(() => {
-    graphRef.current = new MultiDirectedGraph();
+    graphRef.current.clear();
     setSummary(null);
     setSummaryError(null);
     setEgoError(null);

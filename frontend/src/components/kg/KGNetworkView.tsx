@@ -12,6 +12,7 @@ import {
 } from "./graphHelpers";
 
 import "@react-sigma/core/lib/style.css";
+import { ErrorBoundary } from "../ErrorBoundary";
 
 // ── ForceAtlas2 controller ───────────────────────────────────────────────────
 
@@ -261,18 +262,20 @@ export function KGNetworkView({
   }
 
   return (
-    <SigmaContainer
-      graph={graphRef.current}
-      settings={sigmaSettings}
-      style={{ width: "100%", height: "100%", background: "#0f172a" }}
-    >
-      <FA2Controller lowResourceMode={lowResourceMode} shouldRun={hasNodes} />
-      <GraphEventHandlers
-        search={search}
-        kindFilter={kindFilter}
-        onNodeClick={handleNodeClick}
-      />
-      <CameraFocus focusNode={focusNode} />
-    </SigmaContainer>
+    <ErrorBoundary label="Knowledge Graph">
+      <SigmaContainer
+        graph={graphRef.current}
+        settings={sigmaSettings}
+        style={{ width: "100%", height: "100%", background: "#0f172a" }}
+      >
+        <FA2Controller lowResourceMode={lowResourceMode} shouldRun={hasNodes} />
+        <GraphEventHandlers
+          search={search}
+          kindFilter={kindFilter}
+          onNodeClick={handleNodeClick}
+        />
+        <CameraFocus focusNode={focusNode} />
+      </SigmaContainer>
+    </ErrorBoundary>
   );
 }
