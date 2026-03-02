@@ -7,6 +7,8 @@ import type { TerminalLogEntry } from "../types";
 const LOG_PREFIX: Record<TerminalLogEntry["type"], string> = {
   system: "[SYSTEM]",
   agent: "[AGENT]",
+  step: "[STEP]",
+  status: "[STATUS]",
   tool_start: "[TOOL]",
   tool_end: "[TOOL]",
   sources: "[SOURCES]",
@@ -43,7 +45,7 @@ const LogLine = memo(function LogLine({ entry, debugMode }: LogLineProps) {
       <span className="terminal-log-msg">
         {entry.message}
         {debugMode && entry.detail && entry.detail !== entry.message && (
-          <span style={{ display: "block", opacity: 0.6, fontSize: "0.9em", marginTop: 1 }}>
+          <span className="terminal-log-detail">
             ↳ {entry.detail}
           </span>
         )}

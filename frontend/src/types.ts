@@ -30,7 +30,36 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   toolEvents?: ToolEvent[];
+  steps?: AgentStep[];
+  completionStatus?: AssistantCompletionStatus;
   sources?: SourceRef[];
+}
+
+export type AssistantCompletionStatus = "streaming" | "complete" | "incomplete";
+
+export type AgentStepState = "running" | "done" | "error";
+
+export interface AgentStep {
+  seq: number;
+  stepId: string;
+  message: string;
+  state: AgentStepState;
+  category: "tool" | "stage";
+  tool?: string;
+  durationMs?: number;
+}
+
+export interface AgentProgressEvent {
+  seq: number;
+  eventType: "step" | "status";
+  state: AgentStepState;
+  message: string;
+  stepId?: string;
+  category?: "tool" | "stage";
+  tool?: string;
+  durationMs?: number;
+  phase?: string;
+  verbose?: boolean;
 }
 
 export interface ToolEvent {
@@ -242,6 +271,8 @@ export type TerminalLogLevel = "info" | "success" | "warn" | "error";
 export type TerminalLogType =
   | "system"
   | "agent"
+  | "step"
+  | "status"
   | "tool_start"
   | "tool_end"
   | "sources"

@@ -445,6 +445,67 @@ describe("streamChat", () => {
     expect(onDone).toHaveBeenCalledOnce();
   });
 
+  // ── 10b. step/status progress events ───────────────────────────────────
+
+  it("calls onProgressEvent for step and status SSE events", async () => {
+    const { onDone } = makeCallbacks();
+    const onProgressEvent = vi.fn();
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        sseData({
+          type: "step",
+          seq: 2,
+          step_id: "tool-get_price-2",
+          category: "tool",
+          tool: "get_price",
+          state: "running",
+          message: "Fetching data via get price",
+        }),
+        sseData({
+          type: "status",
+          seq: 3,
+          phase: "finalize_response",
+          state: "running",
+          message: "Synthesizing final response",
+          verbose: true,
+        }),
+        sseData({ type: "done" }),
+      ]),
+    );
+
+    await streamChat(
+      "hi", "s1", [], vi.fn(), onDone, vi.fn(),
+      undefined, undefined, undefined, undefined, onProgressEvent,
+    );
+
+    expect(onProgressEvent).toHaveBeenCalledTimes(2);
+    expect(onProgressEvent).toHaveBeenNthCalledWith(1, {
+      seq: 2,
+      eventType: "step",
+      state: "running",
+      message: "Fetching data via get price",
+      stepId: "tool-get_price-2",
+      category: "tool",
+      tool: "get_price",
+      durationMs: undefined,
+      phase: undefined,
+      verbose: false,
+    });
+    expect(onProgressEvent).toHaveBeenNthCalledWith(2, {
+      seq: 3,
+      eventType: "status",
+      state: "running",
+      message: "Synthesizing final response",
+      stepId: undefined,
+      category: undefined,
+      tool: undefined,
+      durationMs: undefined,
+      phase: "finalize_response",
+      verbose: true,
+    });
+    expect(onDone).toHaveBeenCalledOnce();
+  });
+
   // ── 11. settled flag prevents double-call ────────────────────────────────
 
   it("calls onDone exactly once even when done event appears and stream also closes", async () => {

@@ -201,7 +201,7 @@ class TestChatSSE:
             return resp.status_code, resp.text
 
     async def test_sse_happy_path(self):
-        """Full happy-path: tool_start, tool_end, token, done events."""
+        """Full happy-path: progress + tool/token + done events."""
         self.graph_mock.astream_events = _happy_path_events
         app = self._app()
 
@@ -214,10 +214,13 @@ class TestChatSSE:
 
         events = _parse_sse(body)
         types = [e["type"] for e in events]
+        assert "status" in types
+        assert "step" in types
         assert "tool_start" in types
         assert "tool_end" in types
         assert "token" in types
         assert types[-1] == "done"
+        assert all("seq" in e for e in events)
 
     async def test_sse_tool_end_includes_duration(self):
         self.graph_mock.astream_events = _happy_path_events

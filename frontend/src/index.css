@@ -967,6 +967,67 @@ body {
   color: var(--red);
 }
 
+/* ── Agent step progress (chat) ─────────────────────────────────────────── */
+
+.chat-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.chat-step-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.chat-step-indicator {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  flex-shrink: 0;
+}
+
+.chat-step-indicator--running {
+  border-color: var(--accent);
+  border-top-color: transparent;
+  animation: chat-step-spin 0.85s linear infinite;
+}
+
+.chat-step-indicator--done {
+  background: var(--green);
+  border-color: var(--green);
+}
+
+.chat-step-indicator--error {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+.chat-step-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.chat-incomplete {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--yellow);
+}
+
+@keyframes chat-step-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 @keyframes chip-pulse {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.55; }
@@ -1834,4 +1895,11 @@ body {
 .terminal-log-msg {
   color: #d4d4d8;
   word-break: break-all;
+}
+
+.terminal-log-detail {
+  display: block;
+  opacity: 0.65;
+  font-size: 0.9em;
+  margin-top: 1px;
 }

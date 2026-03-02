@@ -7,7 +7,19 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import type { BackendStatus, ChatMessage, PortfolioPosition, SourceRef, TerminalLogEntry, TerminalLogLevel, TerminalLogType, TickerInfo, ToolEvent, WatchlistItem } from "../types";
+import type {
+  AgentStep,
+  BackendStatus,
+  ChatMessage,
+  PortfolioPosition,
+  SourceRef,
+  TerminalLogEntry,
+  TerminalLogLevel,
+  TerminalLogType,
+  TickerInfo,
+  ToolEvent,
+  WatchlistItem,
+} from "../types";
 import {
   fetchHealthDetailed,
   fetchPortfolio,
@@ -80,6 +92,8 @@ type Action =
   | { type: "APPEND_TO_LAST_MESSAGE"; content: string }
   | { type: "SET_CHAT_STREAMING"; streaming: boolean }
   | { type: "UPDATE_TOOL_EVENT"; event: ToolEvent }
+  | { type: "UPDATE_AGENT_STEP"; step: AgentStep }
+  | { type: "SET_LAST_ASSISTANT_STATUS"; status: "streaming" | "complete" | "incomplete" }
   | { type: "SET_LAST_MESSAGE_SOURCES"; sources: SourceRef[] }
   | { type: "SET_TICKER_REPORT"; report: string }
   | { type: "APPEND_TICKER_REPORT"; content: string }
@@ -134,6 +148,34 @@ function reducer(state: AppState, action: Action): AppState {
           ? [...existing.slice(0, idx), action.event, ...existing.slice(idx + 1)]
           : [...existing, action.event];
       msgs[msgs.length - 1] = { ...last, toolEvents: updated };
+      return { ...state, chatMessages: msgs };
+    }
+    case "UPDATE_AGENT_STEP": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+
+      const existing = last.steps ?? [];
+      const idxByStepId = existing.findIndex((s) => s.stepId === action.step.stepId);
+      const idxBySeq = existing.findIndex((s) => s.seq === action.step.seq && action.step.seq >= 0);
+      const idx = idxByStepId >= 0 ? idxByStepId : idxBySeq;
+
+      const updated =
+        idx >= 0
+          ? [...existing.slice(0, idx), action.step, ...existing.slice(idx + 1)]
+          : [...existing, action.step];
+
+      updated.sort((a, b) => a.seq - b.seq);
+      msgs[msgs.length - 1] = { ...last, steps: updated };
+      return { ...state, chatMessages: msgs };
+    }
+    case "SET_LAST_ASSISTANT_STATUS": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      msgs[msgs.length - 1] = { ...last, completionStatus: action.status };
       return { ...state, chatMessages: msgs };
     }
     case "SET_LAST_MESSAGE_SOURCES": {
@@ -399,6 +441,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       role: "assistant",
       content: "",
       timestamp: Date.now(),
+      completionStatus: "streaming",
     };
 
     dispatch({ type: "ADD_CHAT_MESSAGE", message: userMsg });
@@ -422,12 +465,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       },
       () => {
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
+        dispatch({ type: "SET_LAST_ASSISTANT_STATUS", status: "complete" });
         termLog("done", "success", "Pipeline complete.");
       },
       (err, detail) => {
         const displayMsg = state.debugMode && detail ? detail : err;
-        dispatch({ type: "APPEND_TO_LAST_MESSAGE", content: `\n[Error: ${displayMsg}]` });
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
+        dispatch({ type: "SET_LAST_ASSISTANT_STATUS", status: "incomplete" });
         termLog("error", "error", displayMsg, detail);
       },
       undefined, // signal
@@ -457,6 +501,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
           dispatch({ type: "KG_UPDATED" });
           termLog("kg_update", "info", `Graph updated: ${_nodesCreated} node(s), ${_edgesCreated} edge(s).`);
         }
+      },
+      (progressEvent) => {
+        const msg = progressEvent.message;
+        if (progressEvent.eventType === "step") {
+          dispatch({
+            type: "UPDATE_AGENT_STEP",
+            step: {
+              seq: progressEvent.seq,
+              stepId: progressEvent.stepId ?? `seq-${progressEvent.seq}`,
+              message: msg,
+              state: progressEvent.state,
+              category: progressEvent.category ?? "tool",
+              tool: progressEvent.tool,
+              durationMs: progressEvent.durationMs,
+            },
+          });
+          const level: TerminalLogLevel =
+            progressEvent.state === "error"
+              ? "error"
+              : progressEvent.state === "done"
+                ? "success"
+                : "info";
+          termLog("step", level, msg);
+          return;
+        }
+
+        const level: TerminalLogLevel =
+          progressEvent.state === "error"
+            ? "error"
+            : progressEvent.state === "done"
+              ? "success"
+              : "info";
+        const detail = progressEvent.phase ? `phase=${progressEvent.phase}` : undefined;
+        termLog("status", level, msg, detail);
       },
     );
   }, [termLog, state.debugMode]);

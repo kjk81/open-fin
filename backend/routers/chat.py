@@ -4,7 +4,8 @@ import json
 import logging
 import re
 import time
-from typing import AsyncGenerator
+from collections import defaultdict
+from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter
 from fastapi import HTTPException
@@ -12,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from langchain_core.messages import HumanMessage
 
-from agent.graph import graph
+from agent.graph import describe_graph_stage, graph
 from agent.knowledge_graph import upsert_from_tool_results
 from database import SessionLocal
 from models import ChatHistory
@@ -84,6 +85,8 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     Run the LangGraph workflow and yield SSE-formatted strings.
 
     Event types emitted:
+            step        — concise step-by-step progress update for chat UI
+            status      — verbose execution status update for terminal UI
       tool_start  — a tool call has begun
       tool_end    — a tool call completed (with duration + success flag)
       token       — a single LLM output token
@@ -111,8 +114,27 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     accumulated_tool_results: list[dict] = []
     accumulated_sources: list[dict] = []
     tool_start_times: dict[str, float] = {}
+    event_seq = 0
+    tool_step_ids: dict[str, list[str]] = defaultdict(list)
+    stage_step_ids: dict[str, str] = {}
+
+    def emit(data: dict[str, Any]) -> str:
+        nonlocal event_seq
+        event_seq += 1
+        return _sse({"seq": event_seq, **data})
+
+    def tool_human_label(tool_name: str) -> str:
+        return tool_name.replace("_", " ")
 
     try:
+        yield emit({
+            "type": "status",
+            "state": "running",
+            "phase": "stream",
+            "message": "Starting agent pipeline",
+            "verbose": True,
+        })
+
         event_iter = graph.astream_events(initial_state, version="v2").__aiter__()
         while True:
             try:
@@ -126,18 +148,61 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             name: str = event.get("name", "")
             data: dict = event.get("data", {})
 
-            if evt == "on_tool_start":
+            if evt == "on_chain_start":
+                stage_message = describe_graph_stage(name, "start")
+                if stage_message:
+                    step_id = f"stage-{name}-{event_seq + 1}"
+                    stage_step_ids[name] = step_id
+                    yield emit({
+                        "type": "status",
+                        "step_id": step_id,
+                        "state": "running",
+                        "phase": name,
+                        "message": stage_message,
+                        "verbose": True,
+                    })
+
+            elif evt == "on_chain_end":
+                stage_message = describe_graph_stage(name, "end")
+                if stage_message:
+                    step_id = stage_step_ids.pop(name, f"stage-{name}-{event_seq + 1}")
+                    yield emit({
+                        "type": "status",
+                        "step_id": step_id,
+                        "state": "done",
+                        "phase": name,
+                        "message": stage_message,
+                        "verbose": True,
+                    })
+
+            elif evt == "on_tool_start":
                 tool_start_times[name] = time.monotonic()
                 raw_input = data.get("input") or {}
                 # Keep args summary concise for the frontend chip
                 args_preview = {k: v for k, v in list(raw_input.items())[:3]}
-                yield _sse({"type": "tool_start", "tool": name, "args": args_preview})
+                step_id = f"tool-{name}-{event_seq + 1}"
+                tool_step_ids[name].append(step_id)
+
+                yield emit({
+                    "type": "step",
+                    "step_id": step_id,
+                    "category": "tool",
+                    "tool": name,
+                    "state": "running",
+                    "message": f"Fetching data via {tool_human_label(name)}",
+                })
+                yield emit({"type": "tool_start", "tool": name, "args": args_preview})
 
             elif evt == "on_tool_end":
                 started = tool_start_times.pop(name, time.monotonic())
                 duration_ms = int((time.monotonic() - started) * 1000)
                 output = data.get("output") or ""
                 success = True
+                step_id = (
+                    tool_step_ids[name].pop(0)
+                    if tool_step_ids.get(name)
+                    else f"tool-{name}-{event_seq + 1}"
+                )
 
                 if isinstance(output, str) and output:
                     try:
@@ -157,7 +222,20 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     except json.JSONDecodeError:
                         pass
 
-                yield _sse({"type": "tool_end", "tool": name, "duration_ms": duration_ms, "success": success})
+                yield emit({
+                    "type": "step",
+                    "step_id": step_id,
+                    "category": "tool",
+                    "tool": name,
+                    "state": "done" if success else "error",
+                    "duration_ms": duration_ms,
+                    "message": (
+                        f"Completed {tool_human_label(name)}"
+                        if success
+                        else f"{tool_human_label(name)} failed"
+                    ),
+                })
+                yield emit({"type": "tool_end", "tool": name, "duration_ms": duration_ms, "success": success})
 
             elif evt == "on_chat_model_stream":
                 chunk = data.get("chunk")
@@ -174,9 +252,17 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     elif not isinstance(content, str):
                         content = str(content)
                     if content:
-                        yield _sse({"type": "token", "content": content})
+                        yield emit({"type": "token", "content": content})
 
         # ── Post-graph side-effects ────────────────────────────────────────
+        yield emit({
+            "type": "status",
+            "state": "running",
+            "phase": "post_process",
+            "message": "Finalizing citations and knowledge graph updates",
+            "verbose": True,
+        })
+
         kg_result: dict = {"nodes_created": 0, "edges_created": 0, "node_ids": []}
         kg_error: str | None = None
         if accumulated_tool_results:
@@ -190,10 +276,10 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                 kg_error = str(exc)
 
         if accumulated_sources:
-            yield _sse({"type": "sources", "sources": accumulated_sources})
+            yield emit({"type": "sources", "sources": accumulated_sources})
 
         if kg_result.get("nodes_created", 0) > 0 or kg_result.get("edges_created", 0) > 0:
-            yield _sse({
+            yield emit({
                 "type": "kg_update",
                 "nodes_created": kg_result["nodes_created"],
                 "edges_created": kg_result["edges_created"],
@@ -201,18 +287,31 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         elif kg_error:
             # Emit a kg_update with zero counts and an error field so the
             # frontend can surface the failure in the terminal log.
-            yield _sse({
+            yield emit({
                 "type": "kg_update",
                 "nodes_created": 0,
                 "edges_created": 0,
                 "error": kg_error,
             })
-
-        yield _sse({"type": "done"})
+        yield emit({
+            "type": "status",
+            "state": "done",
+            "phase": "stream",
+            "message": "Agent pipeline complete",
+            "verbose": True,
+        })
+        yield emit({"type": "done"})
 
     except asyncio.TimeoutError:
         logger.error("Chat stream timed out after %.0fs.", GRAPH_STREAM_TIMEOUT)
-        yield _sse({
+        yield emit({
+            "type": "status",
+            "state": "error",
+            "phase": "stream",
+            "message": "Agent response incomplete due to timeout",
+            "verbose": True,
+        })
+        yield emit({
             "type": "error",
             "content": "The request timed out. Please try again.",
             "detail": f"TimeoutError: Graph stream exceeded {GRAPH_STREAM_TIMEOUT}s",
@@ -221,14 +320,28 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         # FallbackLLM raises RuntimeError with a user-actionable message when
         # no provider is configured or all providers fail. Surface it directly.
         logger.error("Chat stream RuntimeError: %s", exc)
-        yield _sse({
+        yield emit({
+            "type": "status",
+            "state": "error",
+            "phase": "stream",
+            "message": "Agent response incomplete due to runtime failure",
+            "verbose": True,
+        })
+        yield emit({
             "type": "error",
             "content": str(exc),
             "detail": f"RuntimeError: {exc}",
         })
     except Exception as exc:
         logger.error("Chat stream error: %s", exc, exc_info=True)
-        yield _sse({
+        yield emit({
+            "type": "status",
+            "state": "error",
+            "phase": "stream",
+            "message": "Agent response incomplete due to unexpected error",
+            "verbose": True,
+        })
+        yield emit({
             "type": "error",
             "content": f"An error occurred ({type(exc).__name__}). Check the terminal for details.",
             "detail": f"{type(exc).__name__}: {exc}",

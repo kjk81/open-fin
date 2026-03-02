@@ -304,6 +304,7 @@ export async function streamChat(
   onToolEvent?: (event: import("./types").ToolEvent) => void,
   onSources?: (sources: import("./types").SourceRef[]) => void,
   onKgUpdate?: (nodesCreated: number, edgesCreated: number, error?: string) => void,
+  onProgressEvent?: (event: import("./types").AgentProgressEvent) => void,
 ): Promise<void> {
   let res: Response;
   try {
@@ -408,6 +409,24 @@ export async function streamChat(
         onSources(event.sources ?? []);
       } else if (event.type === "kg_update" && onKgUpdate) {
         onKgUpdate(event.nodes_created ?? 0, event.edges_created ?? 0, event.error);
+      } else if ((event.type === "step" || event.type === "status") && onProgressEvent) {
+        const rawState = event.state;
+        const state =
+          rawState === "done" || rawState === "error" || rawState === "running"
+            ? rawState
+            : "running";
+        onProgressEvent({
+          seq: typeof event.seq === "number" ? event.seq : -1,
+          eventType: event.type,
+          state,
+          message: typeof event.message === "string" ? event.message : "Agent update",
+          stepId: typeof event.step_id === "string" ? event.step_id : undefined,
+          category: event.category === "tool" || event.category === "stage" ? event.category : undefined,
+          tool: typeof event.tool === "string" ? event.tool : undefined,
+          durationMs: typeof event.duration_ms === "number" ? event.duration_ms : undefined,
+          phase: typeof event.phase === "string" ? event.phase : undefined,
+          verbose: Boolean(event.verbose),
+        });
       }
     } catch {
       // ignore malformed JSON

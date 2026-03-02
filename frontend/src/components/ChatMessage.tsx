@@ -2,7 +2,13 @@ import type { AnchorHTMLAttributes, ClassAttributes } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useAppContext } from "../context/AppContext";
-import type { ChatMessage as ChatMessageType, SourceRef, ToolEvent, TradeOrder } from "../types";
+import type {
+  AgentStep,
+  ChatMessage as ChatMessageType,
+  SourceRef,
+  ToolEvent,
+  TradeOrder,
+} from "../types";
 
 // Matches [TRADE: {...}] blocks emitted by the LLM
 const TRADE_RE = /\[TRADE:\s*(\{[^}]*\})\]/g;
@@ -24,15 +30,21 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
   return (
     <div className={`chat-message chat-message--${isUser ? "user" : isSystem ? "system" : "assistant"}`}>
       <div className="chat-bubble">
-        {isAssistant && message.toolEvents && message.toolEvents.length > 0 && (
+        {isAssistant && (!message.steps || message.steps.length === 0) && message.toolEvents && message.toolEvents.length > 0 && (
           <div className="tool-chips">
             {message.toolEvents.map((e, i) => (
               <ToolChip key={`${e.tool}-${i}`} event={e} />
             ))}
           </div>
         )}
+        {isAssistant && message.steps && message.steps.length > 0 && (
+          <StepProgress steps={message.steps} />
+        )}
         {parts}
         {isStreaming && isAssistant && <span className="typing-cursor" />}
+        {isAssistant && message.completionStatus === "incomplete" && (
+          <div className="chat-incomplete">Response incomplete — request timed out or failed.</div>
+        )}
         {isAssistant && message.sources && message.sources.length > 0 && (
           <CitationFooter sources={message.sources} />
         )}
@@ -76,6 +88,28 @@ function CitationFooter({ sources }: { sources: SourceRef[] }) {
         >
           [{i + 1}] {src.title}
         </a>
+      ))}
+    </div>
+  );
+}
+
+function StepProgress({ steps }: { steps: AgentStep[] }) {
+  return (
+    <div className="chat-steps" aria-label="Agent execution steps">
+      {steps.map((step) => (
+        <div key={step.stepId} className="chat-step-row">
+          <span
+            className={
+              step.state === "running"
+                ? "chat-step-indicator chat-step-indicator--running"
+                : step.state === "done"
+                  ? "chat-step-indicator chat-step-indicator--done"
+                  : "chat-step-indicator chat-step-indicator--error"
+            }
+            aria-hidden="true"
+          />
+          <span className="chat-step-text">{step.message}</span>
+        </div>
       ))}
     </div>
   );

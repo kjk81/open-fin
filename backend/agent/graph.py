@@ -51,6 +51,16 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 5
 
+GRAPH_STAGE_LABELS: dict[str, tuple[str, str]] = {
+    "intent_router": ("Classifying your request", "Request intent classified"),
+    "context_injector": ("Injecting portfolio and mention context", "Context injection complete"),
+    "route_finance_query": ("Planning required data fetches", "Planning step complete"),
+    "execute_tool_calls": ("Executing finance data tools", "Tool execution round complete"),
+    "force_tool_retry": ("Forcing tool usage for fresh market data", "Tool usage directive injected"),
+    "finalize_response": ("Synthesizing final response", "Final response generated"),
+    "generation_node": ("Generating direct response", "Direct response generated"),
+}
+
 _FINANCE_INTENTS: frozenset[str] = frozenset({
     "trade_recommendation",
     "ticker_deep_dive",
@@ -326,6 +336,19 @@ def _get_model(role: str = "subagent"):
         f"No LLM provider available for role='{role}'. "
         "Configure at least one provider in backend/.env."
     )
+
+
+def describe_graph_stage(node_name: str, phase: str) -> str | None:
+    """Return a human-readable stage label for graph node lifecycle events.
+
+    Args:
+        node_name: LangGraph node name from stream events.
+        phase: Lifecycle phase ("start" or "end").
+    """
+    labels = GRAPH_STAGE_LABELS.get(node_name)
+    if labels is None:
+        return None
+    return labels[0] if phase == "start" else labels[1]
 
 
 def _get_tool_bound_model(tools: list, role: str = "subagent"):
