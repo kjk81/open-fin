@@ -378,6 +378,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
             dispatch({ type: "SET_TICKER_REPORT_ERROR", error: errMsg || "Analysis failed" });
           },
           reportAbort.signal,
+          undefined,  // onToolEvent
+          undefined,  // onSources
+          () => {     // onKgUpdate — RC4 fix: ensure graph explorer refreshes
+            dispatch({ type: "KG_UPDATED" });
+          },
         );
       })
       .catch((err) => {

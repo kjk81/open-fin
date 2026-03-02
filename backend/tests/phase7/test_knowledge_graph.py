@@ -286,19 +286,30 @@ class TestProcWebDocuments:
         assert len(ids) == 2
 
     async def test_duplicate_urls_deduplicated(self, patch_async_db):
-        """Inserting the same URL twice should only create one node."""
+        """Inserting the same URL twice should not create a second row.
+        
+        Because WebDocument metadata includes fetched_at (timestamp), the
+        second upsert will detect a metadata change and return nc=1 (re-embed).
+        The key assertion is that the total row count remains 1 (no duplicate).
+        """
         async with TestAsyncSessionLocal() as session:
-            nc1, _, _, _ = await _proc_web_documents(
+            nc1, _, ids1, _ = await _proc_web_documents(
                 session,
                 sources=[{"url": "https://example.com/dup", "title": "Dup"}],
             )
-            nc2, _, _, _ = await _proc_web_documents(
-                session,
-                sources=[{"url": "https://example.com/dup", "title": "Dup Again"}],
-            )
             await session.commit()
         assert nc1 == 1
-        assert nc2 == 0  # already exists
+
+        async with TestAsyncSessionLocal() as session:
+            nc2, _, ids2, _ = await _proc_web_documents(
+                session,
+                sources=[{"url": "https://example.com/dup", "title": "Dup"}],
+            )
+            await session.commit()
+        # Second call recognizes existing node (metadata changed due to fetched_at)
+        assert nc2 == 1
+        # Same node ID returned, confirming no duplicate row created
+        assert ids1 == ids2
 
     async def test_empty_url_skipped(self, patch_async_db):
         async with TestAsyncSessionLocal() as session:
@@ -426,6 +437,79 @@ class TestUpsertFromToolResults:
         msg = q.get_nowait()
         assert msg[0] == "upsert"
         assert len(msg[1]) >= 1  # node_ids
+
+    async def test_enqueues_updated_nodes(self, patch_async_db, caplog):
+        """Updated nodes with changed metadata are re-enqueued for FAISS."""
+        q = asyncio.Queue(maxsize=100)
+        set_write_queue(q)
+        mgr = MagicMock()
+        mgr.text_for_node = MagicMock(side_effect=lambda t, n, m=None: n)
+        set_faiss_manager(mgr)
+
+        # First upsert: creates node
+        await upsert_from_tool_results([
+            _tool_result_json(
+                "get_company_profile",
+                {"ticker": "UPDT"},
+                {"symbol": "UPDT", "name": "UpdateCo", "sector": "Tech"},
+            ),
+        ])
+        # Drain queue
+        _ = q.get_nowait()
+
+        # Second upsert: updates metadata (sector changes)
+        await upsert_from_tool_results([
+            _tool_result_json(
+                "get_company_profile",
+                {"ticker": "UPDT"},
+                {"symbol": "UPDT", "name": "UpdateCo", "sector": "Finance"},
+            ),
+        ])
+        # Should enqueue updated node
+        assert not q.empty(), "Updated node should be enqueued for FAISS re-embed"
+        msg = q.get_nowait()
+        assert msg[0] == "upsert"
+
+    async def test_queue_none_warning(self, patch_async_db, caplog):
+        """When queue is None, upsert emits warning instead of failing silently."""
+        set_write_queue(None)
+        set_faiss_manager(None)
+
+        await upsert_from_tool_results([
+            _tool_result_json(
+                "get_company_profile",
+                {"ticker": "WARN"},
+                {"symbol": "WARN", "name": "WarnCo"},
+            ),
+        ])
+        # Check warning was emitted
+        assert any(
+            "FAISS write queue not initialized" in rec.message
+            for rec in caplog.records
+        ), "Should warn when queue is None"
+
+    async def test_queue_full_rebuild_signal(self, patch_async_db, caplog):
+        """When queue is full, upsert attempts to enqueue rebuild."""
+        q = asyncio.Queue(maxsize=1)
+        # Fill the queue
+        await q.put(("upsert", [999], ["filler"]))
+        set_write_queue(q)
+        mgr = MagicMock()
+        mgr.text_for_node = MagicMock(side_effect=lambda t, n, m=None: n)
+        set_faiss_manager(mgr)
+
+        await upsert_from_tool_results([
+            _tool_result_json(
+                "get_company_profile",
+                {"ticker": "FULL"},
+                {"symbol": "FULL", "name": "FullCo"},
+            ),
+        ])
+        # Should log queue full + attempt rebuild
+        assert any(
+            "FAISS write queue full" in rec.message
+            for rec in caplog.records
+        ), "Should warn on queue full"
 
 
 # ---------------------------------------------------------------------------

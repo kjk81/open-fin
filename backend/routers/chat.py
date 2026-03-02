@@ -11,7 +11,7 @@ from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from agent.graph import describe_graph_stage, graph
 from agent.knowledge_graph import upsert_from_tool_results
@@ -114,6 +114,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     accumulated_tool_results: list[dict] = []
     accumulated_sources: list[dict] = []
     tool_start_times: dict[str, float] = {}
+    tool_args_cache: dict[str, dict] = {}   # name -> args from on_tool_start
     event_seq = 0
     tool_step_ids: dict[str, list[str]] = defaultdict(list)
     stage_step_ids: dict[str, str] = {}
@@ -163,6 +164,29 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     })
 
             elif evt == "on_chain_end":
+                # Fallback: capture tool_results from any node's on_chain_end
+                # output in case on_tool_end event parsing failed or tools were
+                # executed programmatically (e.g. fallback_tool_execution).
+                # Previously only checked execute_tool_calls (RC6); now generic.
+                chain_output = data.get("output") or {}
+                if isinstance(chain_output, dict):
+                    fallback_results = chain_output.get("tool_results") or []
+                    if fallback_results:
+                        existing_keys = {
+                            (r["tool"], r.get("result", "")[:100])
+                            for r in accumulated_tool_results
+                        }
+                        for fr in fallback_results:
+                            if not isinstance(fr, dict) or not fr.get("tool"):
+                                continue
+                            fkey = (fr["tool"], fr.get("result", "")[:100])
+                            if fkey not in existing_keys:
+                                accumulated_tool_results.append(fr)
+                                logger.debug(
+                                    "Fallback: captured tool_result for %s from %s on_chain_end",
+                                    fr["tool"], name,
+                                )
+
                 stage_message = describe_graph_stage(name, "end")
                 if stage_message:
                     step_id = stage_step_ids.pop(name, f"stage-{name}-{event_seq + 1}")
@@ -178,6 +202,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             elif evt == "on_tool_start":
                 tool_start_times[name] = time.monotonic()
                 raw_input = data.get("input") or {}
+                tool_args_cache[name] = raw_input
                 # Keep args summary concise for the frontend chip
                 args_preview = {k: v for k, v in list(raw_input.items())[:3]}
                 step_id = f"tool-{name}-{event_seq + 1}"
@@ -196,7 +221,6 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             elif evt == "on_tool_end":
                 started = tool_start_times.pop(name, time.monotonic())
                 duration_ms = int((time.monotonic() - started) * 1000)
-                output = data.get("output") or ""
                 success = True
                 step_id = (
                     tool_step_ids[name].pop(0)
@@ -204,23 +228,50 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     else f"tool-{name}-{event_seq + 1}"
                 )
 
-                if isinstance(output, str) and output:
+                # --- Robust output extraction (RC1 fix) ---
+                # LangGraph may emit output as str, ToolMessage, or other types
+                raw_output = data.get("output")
+                output_str: str = ""
+                if isinstance(raw_output, str):
+                    output_str = raw_output
+                elif isinstance(raw_output, ToolMessage):
+                    content = raw_output.content
+                    output_str = content if isinstance(content, str) else json.dumps(content) if content else ""
+                elif hasattr(raw_output, "content"):
+                    # Duck-type for any message-like object
+                    content = raw_output.content
+                    output_str = content if isinstance(content, str) else json.dumps(content) if content else ""
+                elif raw_output is not None:
+                    output_str = str(raw_output)
+
+                if output_str:
                     try:
-                        parsed = json.loads(output)
-                        success = bool(parsed.get("success", True))
+                        parsed = json.loads(output_str)
+                        # Normalize list-shaped output to dict wrapper
+                        if isinstance(parsed, list):
+                            parsed = {"data": parsed, "success": True}
+                        # Guard against non-dict parsed values (RC2 fix)
+                        if isinstance(parsed, dict):
+                            success = bool(parsed.get("success", True))
+                        else:
+                            parsed = {"data": parsed, "success": True}
+                        # Use cached args from on_tool_start (RC3 fix)
+                        tool_args = tool_args_cache.pop(name, None) or data.get("input") or {}
                         # Collect for KG post-processing
                         accumulated_tool_results.append({
                             "tool": name,
-                            "args": data.get("input") or {},
-                            "result": output,
+                            "args": tool_args,
+                            "result": json.dumps(parsed),
                         })
                         # Collect citations — deduplicated by URL
-                        for src in parsed.get("sources") or []:
-                            url = src.get("url") or ""
-                            if url and not any(s["url"] == url for s in accumulated_sources):
-                                accumulated_sources.append({"url": url, "title": src.get("title") or url})
-                    except json.JSONDecodeError:
-                        pass
+                        if isinstance(parsed, dict):
+                            for src in parsed.get("sources") or []:
+                                url = src.get("url") or ""
+                                if url and not any(s["url"] == url for s in accumulated_sources):
+                                    accumulated_sources.append({"url": url, "title": src.get("title") or url})
+                    except Exception as exc:
+                        # RC2 fix: catch ALL exceptions, not just JSONDecodeError
+                        logger.debug("on_tool_end parse error for %s: %s", name, exc)
 
                 yield emit({
                     "type": "step",
@@ -265,6 +316,12 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
 
         kg_result: dict = {"nodes_created": 0, "edges_created": 0, "node_ids": []}
         kg_error: str | None = None
+        tool_names_collected = [r.get("tool") for r in accumulated_tool_results if isinstance(r, dict)]
+        logger.info(
+            "KG post-processing: %d accumulated tool result(s) to process: %s",
+            len(accumulated_tool_results),
+            tool_names_collected or "(none)",
+        )
         if accumulated_tool_results:
             try:
                 kg_result = await upsert_from_tool_results(
@@ -278,21 +335,16 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         if accumulated_sources:
             yield emit({"type": "sources", "sources": accumulated_sources})
 
-        if kg_result.get("nodes_created", 0) > 0 or kg_result.get("edges_created", 0) > 0:
-            yield emit({
-                "type": "kg_update",
-                "nodes_created": kg_result["nodes_created"],
-                "edges_created": kg_result["edges_created"],
-            })
-        elif kg_error:
-            # Emit a kg_update with zero counts and an error field so the
-            # frontend can surface the failure in the terminal log.
-            yield emit({
-                "type": "kg_update",
-                "nodes_created": 0,
-                "edges_created": 0,
-                "error": kg_error,
-            })
+        # RC5 fix: always emit kg_update so frontend knows post-processing
+        # completed and can refresh the graph explorer, even when counts are 0.
+        kg_event: dict[str, Any] = {
+            "type": "kg_update",
+            "nodes_created": kg_result.get("nodes_created", 0),
+            "edges_created": kg_result.get("edges_created", 0),
+        }
+        if kg_error:
+            kg_event["error"] = kg_error
+        yield emit(kg_event)
         yield emit({
             "type": "status",
             "state": "done",

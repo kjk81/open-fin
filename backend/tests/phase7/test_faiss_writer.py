@@ -20,10 +20,17 @@ async def faiss_writer_loop(
     write_queue: asyncio.Queue,
     faiss_mgr: MagicMock,
     session_factory: MagicMock,
+    faiss_ready: bool = True,
 ) -> int:
     """Execute the writer loop until shutdown sentinel.
 
     Returns the number of upsert operations processed.
+
+    Parameters
+    ----------
+    faiss_ready:
+        Simulate FAISS readiness gate; when False, dequeued messages are
+        dropped with a warning (degraded mode).
     """
     upsert_count = 0
 
@@ -34,6 +41,10 @@ async def faiss_writer_loop(
 
             if op is None:
                 break
+
+            # Guard: degraded mode
+            if not faiss_ready:
+                continue
 
             if op == "upsert" and node_ids:
                 faiss_mgr.upsert_vectors(node_ids, texts)
@@ -198,3 +209,34 @@ class TestFaissWriterLoop:
         except asyncio.CancelledError:
             result = 0  # also acceptable
         assert result == 0
+
+    async def test_degraded_mode_drops_messages(self, queue, mgr, session_factory):
+        """When faiss_ready=False, writer dequeues but skips FAISS ops."""
+        await queue.put(("upsert", [1, 2], ["a", "b"]))
+        await queue.put(("rebuild", None, None))
+        await queue.put((None, None, None))
+
+        count = await faiss_writer_loop(queue, mgr, session_factory, faiss_ready=False)
+        # No upserts should have been processed
+        assert count == 0
+        mgr.upsert_vectors.assert_not_called()
+        mgr._rebuild_from_db.assert_not_called()
+
+    async def test_degraded_mode_then_ready(self, mgr, session_factory):
+        """Simulate startup degraded, then FAISS becomes ready mid-run."""
+        # This is illustrative; in practice, readiness is static in main.py.
+        # Here we just confirm the gate works as a toggle.
+        queue = asyncio.Queue()
+        await queue.put(("upsert", [1], ["x"]))
+        await queue.put((None, None, None))
+
+        # First run: not ready
+        count = await faiss_writer_loop(queue, mgr, session_factory, faiss_ready=False)
+        assert count == 0
+
+        # Second run: ready
+        await queue.put(("upsert", [2], ["y"]))
+        await queue.put((None, None, None))
+        count = await faiss_writer_loop(queue, mgr, session_factory, faiss_ready=True)
+        assert count == 1
+        mgr.upsert_vectors.assert_called_once_with([2], ["y"])

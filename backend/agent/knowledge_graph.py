@@ -169,12 +169,18 @@ async def _aupsert_node(
     existing = result.scalar_one_or_none()
 
     if existing is not None:
+        # Check if metadata actually changed to minimize spurious re-embeds
+        metadata_changed = False
         if metadata:
-            merged = json.loads(existing.metadata_json or "{}")
+            old_meta = json.loads(existing.metadata_json or "{}")
+            merged = old_meta.copy()
             merged.update(metadata)
-            existing.metadata_json = json.dumps(merged)
+            if merged != old_meta:
+                existing.metadata_json = json.dumps(merged)
+                metadata_changed = True
         existing.updated_at = datetime.now(timezone.utc)
-        return existing.id, False
+        # Return True if metadata changed so caller enqueues re-embed
+        return existing.id, metadata_changed
 
     node = KGNode(
         node_type=node_type,
@@ -599,6 +605,124 @@ async def _proc_screen_stocks(
     return nodes_c, edges_c, new_ids, new_texts
 
 
+async def _proc_ohlcv(
+    session: AsyncSession,
+    args: dict,
+    data: list | dict,
+) -> tuple[int, int, list[int], list[str]]:
+    """Create metric nodes from OHLCV bar data.
+
+    Persists the most-recent bar's close price and volume as
+    ``MetricObservation`` nodes so the KG captures historical price data
+    alongside fundamental metrics.
+    """
+    symbol = (args.get("symbol") or args.get("ticker") or "").upper().strip()
+    if not symbol:
+        return 0, 0, [], []
+
+    rows = data if isinstance(data, list) else [data]
+    if not rows:
+        return 0, 0, [], []
+
+    new_ids: list[int] = []
+    new_texts: list[str] = []
+    nodes_c = 0
+    edges_c = 0
+
+    # Ensure company node exists
+    c_id, c_new = await _aupsert_node(session, "company", symbol)
+    if c_new:
+        new_ids.append(c_id)
+        new_texts.append(symbol)
+        nodes_c += 1
+
+    # Use the most recent bar only to avoid flooding the KG
+    latest = rows[-1] if isinstance(rows[-1], dict) else {}
+    bar_date = _parse_date(latest.get("date") or str(date.today()))
+
+    for metric_name, field_key, unit in (
+        ("close", "close", None),
+        ("volume", "volume", "shares"),
+    ):
+        val = latest.get(field_key)
+        if val is None:
+            continue
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            continue
+        obs = MetricObservation(
+            metric_name=metric_name,
+            value=val,
+            unit=unit,
+            observed_at=bar_date,
+            source_ticker=symbol,
+        )
+        kw = obs.to_kg_node_kwargs()
+        m_id, m_new = await _aupsert_node(
+            session, kw["node_type"], kw["name"], json.loads(kw["metadata_json"])
+        )
+        if m_new:
+            new_ids.append(m_id)
+            new_texts.append(obs.embedding_text())
+            nodes_c += 1
+        if await _aupsert_edge(session, m_id, c_id, "OBSERVED_FOR"):
+            edges_c += 1
+
+    return nodes_c, edges_c, new_ids, new_texts
+
+
+async def _proc_institutional_holders(
+    session: AsyncSession,
+    args: dict,
+    data: list | dict,
+) -> tuple[int, int, list[int], list[str]]:
+    """Create institution nodes and HELD_BY edges from institutional holder data."""
+    symbol = (args.get("symbol") or args.get("ticker") or "").upper().strip()
+    if not symbol:
+        return 0, 0, [], []
+
+    rows = data if isinstance(data, list) else [data]
+
+    new_ids: list[int] = []
+    new_texts: list[str] = []
+    nodes_c = 0
+    edges_c = 0
+
+    # Ensure company node exists
+    c_id, c_new = await _aupsert_node(session, "company", symbol)
+    if c_new:
+        new_ids.append(c_id)
+        new_texts.append(symbol)
+        nodes_c += 1
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        holder_name = (row.get("holder_name") or "").strip()
+        if not holder_name:
+            continue
+
+        meta: dict = {}
+        if row.get("shares") is not None:
+            meta["shares"] = row["shares"]
+        if row.get("pct_ownership") is not None:
+            meta["pct_ownership"] = row["pct_ownership"]
+        if row.get("change_pct") is not None:
+            meta["change_pct"] = row["change_pct"]
+
+        inst_name = f"institution:{holder_name}"
+        i_id, i_new = await _aupsert_node(session, "institution", inst_name, meta)
+        if i_new:
+            new_ids.append(i_id)
+            new_texts.append(_embedding_text_for("institution", inst_name, meta))
+            nodes_c += 1
+        if await _aupsert_edge(session, i_id, c_id, "HELD_BY"):
+            edges_c += 1
+
+    return nodes_c, edges_c, new_ids, new_texts
+
+
 # Tool name → processor mapping
 _TOOL_PROCESSORS: dict[str, Any] = {
     "get_company_profile": _proc_company_profile,
@@ -608,6 +732,8 @@ _TOOL_PROCESSORS: dict[str, Any] = {
     "get_technical_snapshot": _proc_technical_snapshot,
     "get_filings_metadata": _proc_filings_metadata,
     "screen_stocks": _proc_screen_stocks,
+    "get_ohlcv": _proc_ohlcv,
+    "get_institutional_holders": _proc_institutional_holders,
 }
 
 # Tools whose sources become WebDocument nodes
@@ -652,6 +778,11 @@ async def upsert_from_tool_results(
     dict
         ``{"nodes_created": int, "edges_created": int, "node_ids": list[int]}``
     """
+    logger.info(
+        "upsert_from_tool_results called with %d tool result(s), %d extra source(s).",
+        len(tool_results),
+        len(extra_sources or []),
+    )
     total_nodes = 0
     total_edges = 0
     all_new_ids: list[int] = []
@@ -696,10 +827,15 @@ async def upsert_from_tool_results(
 
             processor = _TOOL_PROCESSORS.get(tool_name)
             if processor is None:
+                logger.debug("No KG processor registered for tool '%s', skipping.", tool_name)
                 continue
 
             try:
                 nc, ec, ids, texts = await processor(session, args, data)
+                logger.debug(
+                    "KG processor '%s': %d node(s), %d edge(s) created.",
+                    tool_name, nc, ec,
+                )
                 total_nodes += nc
                 total_edges += ec
                 all_new_ids.extend(ids)
@@ -731,14 +867,28 @@ async def upsert_from_tool_results(
             return {"nodes_created": 0, "edges_created": 0, "node_ids": []}
 
     # Enqueue FAISS vector updates (non-blocking)
-    if _write_queue is not None and all_new_ids:
-        try:
-            _write_queue.put_nowait(("upsert", all_new_ids, all_new_texts))
-        except asyncio.QueueFull:
+    if all_new_ids:
+        if _write_queue is None:
             logger.warning(
-                "FAISS write queue full — %d new vectors will be stale until next rebuild.",
+                "FAISS write queue not initialized — %d node(s) will not be indexed: %s",
                 len(all_new_ids),
+                all_new_ids[:10],
             )
+        else:
+            try:
+                _write_queue.put_nowait(("upsert", all_new_ids, all_new_texts))
+            except asyncio.QueueFull:
+                logger.warning(
+                    "FAISS write queue full — %d vectors stale until next rebuild. "
+                    "Consider increasing queue size or triggering rebuild.",
+                    len(all_new_ids),
+                )
+                # Signal that a rebuild is needed when queue overflow happens
+                try:
+                    _write_queue.put_nowait(("rebuild", None, None))
+                    logger.info("Queued rebuild request due to overflow.")
+                except asyncio.QueueFull:
+                    pass  # If rebuild can't be queued, periodic check will handle it
 
     return {
         "nodes_created": total_nodes,
@@ -852,11 +1002,22 @@ def upsert_ticker_snapshot(
         db.close()
 
     # --- Enqueue FAISS vector update (non-blocking) ---
-    if _write_queue is not None and new_node_ids:
-        try:
-            _write_queue.put_nowait(("upsert", new_node_ids, new_node_texts))
-        except asyncio.QueueFull:
+    if new_node_ids:
+        if _write_queue is None:
             logger.warning(
-                "FAISS write queue is full — vectors for %s will be stale until next rebuild.",
+                "FAISS write queue not initialized — ticker %s (%d node(s)) will not be indexed.",
                 symbol,
+                len(new_node_ids),
             )
+        else:
+            try:
+                _write_queue.put_nowait(("upsert", new_node_ids, new_node_texts))
+            except asyncio.QueueFull:
+                logger.warning(
+                    "FAISS write queue full — vectors for %s stale until rebuild.",
+                    symbol,
+                )
+                try:
+                    _write_queue.put_nowait(("rebuild", None, None))
+                except asyncio.QueueFull:
+                    pass

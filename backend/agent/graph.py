@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from langchain_core.messages import (
@@ -57,6 +57,7 @@ GRAPH_STAGE_LABELS: dict[str, tuple[str, str]] = {
     "route_finance_query": ("Planning required data fetches", "Planning step complete"),
     "execute_tool_calls": ("Executing finance data tools", "Tool execution round complete"),
     "force_tool_retry": ("Forcing tool usage for fresh market data", "Tool usage directive injected"),
+    "fallback_tool_execution": ("Auto-fetching market data", "Market data fetched"),
     "finalize_response": ("Synthesizing final response", "Final response generated"),
     "generation_node": ("Generating direct response", "Direct response generated"),
 }
@@ -646,13 +647,13 @@ async def finalize_response(state: AgentState) -> dict:
             session_id=session_id,
             role="user",
             content=current_user_text,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         ))
         db.add(ChatHistory(
             session_id=session_id,
             role="assistant",
             content=full_response,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         ))
         db.commit()
     except Exception as exc:
@@ -701,6 +702,74 @@ async def force_tool_retry(state: AgentState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node: fallback_tool_execution
+# ---------------------------------------------------------------------------
+
+
+async def fallback_tool_execution(state: AgentState) -> dict:
+    """Programmatically invoke core tools when the LLM ignores force_tool_retry.
+
+    Called when ``_should_continue_tools`` detects the LLM produced no tool
+    calls on the second pass (after force_tool_retry already fired).  Directly
+    invokes ``get_company_profile`` and ``get_technical_snapshot`` for every
+    ticker in ``tickers_mentioned`` (up to 3), then injects the raw JSON as a
+    ``SystemMessage`` so ``finalize_response`` has real market data to work with.
+
+    Uses ``SystemMessage`` instead of ``ToolMessage`` intentionally: ToolMessages
+    require matching ``tool_call_id`` values from a prior AIMessage, which we do
+    not have here.  The collected results are also appended to ``tool_results``
+    via the ``operator.add`` reducer so the KG post-processor receives them.
+    """
+    tickers = state.get("tickers_mentioned", [])
+    if not tickers:
+        logger.warning(
+            "fallback_tool_execution: no tickers_mentioned — cannot auto-fetch data. "
+            "KG will remain empty for this request."
+        )
+        return {"tool_call_count": 1}
+
+    tool_results: list[dict] = []
+    data_parts: list[str] = []
+
+    for ticker in tickers[:3]:
+        for tool_fn in (get_company_profile, get_technical_snapshot):
+            try:
+                output: str = await tool_fn.ainvoke({"symbol": ticker})
+                tool_results.append({
+                    "tool": tool_fn.name,
+                    "args": {"symbol": ticker, "ticker": ticker},
+                    "result": output,
+                })
+                data_parts.append(f"[{tool_fn.name}({ticker})]\n{output[:4_000]}")
+                logger.info(
+                    "fallback_tool_execution: fetched %s(%s) — %d chars",
+                    tool_fn.name, ticker, len(output),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "fallback_tool_execution: %s(%s) failed: %s",
+                    tool_fn.name, ticker, exc,
+                )
+
+    messages = []
+    if data_parts:
+        messages.append(SystemMessage(
+            content="AUTO-FETCHED MARKET DATA (tools were not called by the model):\n\n"
+                    + "\n\n".join(data_parts)
+        ))
+
+    logger.info(
+        "fallback_tool_execution: %d tool result(s) collected for %s",
+        len(tool_results), tickers[:3],
+    )
+    return {
+        "messages": messages,
+        "tool_results": tool_results,
+        "tool_call_count": 1,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Conditional edge functions
 # ---------------------------------------------------------------------------
 
@@ -718,10 +787,12 @@ def _route_after_context(state: AgentState) -> str:
 def _should_continue_tools(state: AgentState) -> str:
     """Decide whether to execute more tools, force a retry, or finalise.
 
-    Decision matrix:
-    - tool_calls present AND count < MAX_TOOL_ROUNDS → execute_tool_calls
-    - NO tool_calls AND count == 0 (first pass, bypassed) → force_tool_retry
-    - otherwise → finalize_response
+    Decision matrix (evaluated in order):
+    1. tool_calls present AND count < MAX_TOOL_ROUNDS  → execute_tool_calls
+    2. tool_calls present AND count >= MAX_TOOL_ROUNDS → finalize_response (ceiling)
+    3. NO tool_calls AND count == 0 (first pass)       → force_tool_retry
+    4. NO tool_calls AND count == 1 AND tickers known  → fallback_tool_execution
+    5. otherwise                                        → finalize_response
     """
     last_msg = state["messages"][-1] if state.get("messages") else None
 
@@ -731,8 +802,15 @@ def _should_continue_tools(state: AgentState) -> str:
     )
 
     count = state.get("tool_call_count", 0)
+    tickers = state.get("tickers_mentioned", [])
+
+    logger.info(
+        "_should_continue_tools: has_tool_calls=%s count=%d tickers=%s",
+        has_tool_calls, count, tickers,
+    )
 
     if has_tool_calls and count < MAX_TOOL_ROUNDS:
+        logger.info("Routing → execute_tool_calls (round %d)", count + 1)
         return "execute_tool_calls"
 
     if has_tool_calls and count >= MAX_TOOL_ROUNDS:
@@ -742,17 +820,28 @@ def _should_continue_tools(state: AgentState) -> str:
         )
         return "finalize_response"
 
-    # LLM produced a text response without any tool calls on the very first
-    # pass — this is the "fast bypass" bug.  Route to force_tool_retry once.
+    # First pass with no tool calls — inject a mandatory-tool directive.
     if not has_tool_calls and count == 0:
         logger.warning(
             "LLM skipped tools on first pass (intent=%s, tickers=%s). "
             "Injecting mandatory-tool directive and retrying.",
             state.get("intent", "?"),
-            state.get("tickers_mentioned", []),
+            tickers,
         )
         return "force_tool_retry"
 
+    # Second pass still no tool calls — fall back to programmatic execution
+    # if we know which tickers to fetch.  This is the fix for the failure mode
+    # where the LLM ignores the force_tool_retry directive.
+    if not has_tool_calls and count == 1 and tickers:
+        logger.warning(
+            "LLM still skipped tools after force_tool_retry (tickers=%s). "
+            "Routing → fallback_tool_execution.",
+            tickers,
+        )
+        return "fallback_tool_execution"
+
+    logger.info("Routing → finalize_response (count=%d, has_tool_calls=%s)", count, has_tool_calls)
     return "finalize_response"
 
 
@@ -786,6 +875,7 @@ def build_graph():
     builder.add_node("route_finance_query", route_finance_query)
     builder.add_node("execute_tool_calls", execute_tool_calls)
     builder.add_node("force_tool_retry", force_tool_retry)
+    builder.add_node("fallback_tool_execution", fallback_tool_execution)
     builder.add_node("finalize_response", finalize_response)
 
     # -- Edges --
@@ -807,12 +897,14 @@ def build_graph():
         {
             "execute_tool_calls": "execute_tool_calls",
             "force_tool_retry": "force_tool_retry",
+            "fallback_tool_execution": "fallback_tool_execution",
             "finalize_response": "finalize_response",
         },
     )
 
     builder.add_edge("execute_tool_calls", "route_finance_query")
     builder.add_edge("force_tool_retry", "route_finance_query")
+    builder.add_edge("fallback_tool_execution", "finalize_response")
     builder.add_edge("finalize_response", END)
     builder.add_edge("generation_node", END)
 

@@ -36,8 +36,8 @@ DEFAULT_FALLBACK_ORDER: list[str] = [
 # Role-specific model defaults: (provider, role) -> default model name.
 # Falls back to the provider's global default when no entry matches.
 _ROLE_DEFAULTS: dict[tuple[str, str], str] = {
-    ("ollama", "agent"): "qwen3:4b-instruct",
-    ("ollama", "subagent"): "deepseek-r1:7b",
+    ("ollama", "agent"): "qwen3:4b",
+    ("ollama", "subagent"): "qwen3:8b",
     ("openrouter", "subagent"): "arcee-ai/trinity-large-preview",
     ("groq", "subagent"): "openai/gpt-oss-120b",
 }

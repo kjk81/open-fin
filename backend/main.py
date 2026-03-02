@@ -161,6 +161,9 @@ async def lifespan(app: FastAPI):
 
         After every 50 upserts the soft-delete ratio is checked; if it
         exceeds 10 % a full rebuild is triggered automatically.
+
+        When FAISS is not ready, dequeued messages are silently dropped with
+        a warning, keeping the API responsive in degraded mode.
         """
         nonlocal upsert_count
         while True:
@@ -172,9 +175,24 @@ async def lifespan(app: FastAPI):
                     logger.info("FAISS writer received shutdown sentinel.")
                     break
 
+                # Guard all FAISS operations behind readiness check
+                if not _faiss_ready:
+                    logger.warning(
+                        "FAISS not ready — dropping queue message (op=%s, count=%d). "
+                        "Vector search remains degraded.",
+                        op,
+                        len(node_ids) if node_ids else 0,
+                    )
+                    continue
+
                 if op == "upsert" and node_ids:
                     faiss_mgr.upsert_vectors(node_ids, texts)
                     upsert_count += 1
+                    logger.debug(
+                        "FAISS upsert completed: %d vectors (total upserts: %d).",
+                        len(node_ids),
+                        upsert_count,
+                    )
 
                     if upsert_count % 50 == 0:
                         def _check_rebuild() -> None:
@@ -195,6 +213,7 @@ async def lifespan(app: FastAPI):
                         await asyncio.to_thread(_check_rebuild)
 
                 elif op == "rebuild":
+                    logger.info("FAISS rebuild requested via queue.")
                     _db = SessionLocal()
                     try:
                         faiss_mgr._rebuild_from_db(_db)
@@ -205,7 +224,10 @@ async def lifespan(app: FastAPI):
                 logger.info("FAISS writer task cancelled.")
                 break
             except Exception:
-                logger.exception("Unhandled error in FAISS writer task.")
+                logger.exception(
+                    "Unhandled error in FAISS writer task (op=%s). Continuing.",
+                    op if "op" in locals() else "unknown",
+                )
 
     writer_task = asyncio.create_task(faiss_writer_loop())
     logger.info("FAISS writer task started.")
