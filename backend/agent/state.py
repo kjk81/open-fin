@@ -97,6 +97,12 @@ class AgentState(TypedDict):
     # Point-in-time capability snapshot (health flags + per-check timestamps).
     capabilities: dict[str, Any]
 
+    # Capability/mode degradation details emitted by policy checks.
+    degradation_events: Annotated[list[dict[str, Any]], operator.add]
+
+    # Optional terminal reason used to short-circuit tool loop and finalize.
+    tool_loop_terminated_reason: str
+
     # UUID of the persisted AgentRun record for this invocation.
     # Written once at stream start — no reducer needed.
     run_id: str

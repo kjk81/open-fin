@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -75,6 +76,32 @@ class TestGetToolBoundModelFallback:
         with patch("agent.graph._get_model", side_effect=RuntimeError("No agent provider")):
             with pytest.raises(RuntimeError, match="No agent provider"):
                 _get_tool_bound_model([MagicMock()], role="agent")
+
+    def test_mode_policy_allow_list_filters_tools_before_bind(self):
+        """_get_tool_bound_model must enforce ModePolicy.tool_allow_list."""
+        from agent.graph import _get_tool_bound_model
+        from agent.modes import get_mode_policy
+
+        fake_model = MagicMock()
+        fake_model.bind_tools.return_value = fake_model
+
+        allowed_tool = MagicMock()
+        allowed_tool.name = "get_company_profile"
+        blocked_tool = MagicMock()
+        blocked_tool.name = "search_web"
+
+        mode_policy = get_mode_policy("quick")
+
+        with patch("agent.graph._get_model", return_value=fake_model):
+            result = _get_tool_bound_model(
+                [allowed_tool, blocked_tool],
+                role="agent",
+                mode_policy=mode_policy,
+            )
+
+        assert result is fake_model
+        bound_tools = fake_model.bind_tools.call_args.args[0]
+        assert [tool.name for tool in bound_tools] == ["get_company_profile"]
 
 
 # ── Root cause: _get_model() must unpack 3-tuple from load_llm_settings() ────
@@ -189,6 +216,100 @@ class TestRouteFinanceQueryGraceful:
         # Should NOT raise; should return a state with an error AI message
         last_msg = result["messages"][-1]
         assert "error" in last_msg.content.lower() or "RuntimeError" in last_msg.content
+
+
+class TestToolExecutionBudgets:
+    async def test_execute_tool_calls_enforces_max_tool_calls_per_invocation(self):
+        from agent.graph import execute_tool_calls
+        from langchain_core.messages import AIMessage
+
+        fake_tool = MagicMock()
+        fake_tool.ainvoke = AsyncMock(return_value=json.dumps({"success": True, "price": 101.23}))
+
+        state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "get_company_profile", "args": {"symbol": "AAPL"}, "id": "call-1"},
+                        {"name": "get_company_profile", "args": {"symbol": "MSFT"}, "id": "call-2"},
+                    ],
+                )
+            ],
+            "tool_call_count": 2,
+            "start_time_utc": datetime.now(timezone.utc).isoformat(),
+            "agent_mode": "quick",
+            "executed_skills": [],
+        }
+
+        with patch.dict("agent.graph._TOOL_MAP", {"get_company_profile": fake_tool}, clear=False):
+            result = await execute_tool_calls(state)
+
+        assert result["tool_call_count"] == 1
+        assert len(result["tool_results"]) == 2
+        assert "Budget Exceeded" in result["tool_results"][1]["result"]
+        assert result["tool_loop_terminated_reason"] == "budget_exceeded"
+
+    async def test_execute_tool_calls_enforces_max_seconds_budget(self):
+        from agent.graph import execute_tool_calls
+        from langchain_core.messages import AIMessage
+
+        state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "get_company_profile", "args": {"symbol": "AAPL"}, "id": "call-1"},
+                    ],
+                )
+            ],
+            "tool_call_count": 0,
+            "start_time_utc": (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(),
+            "agent_mode": "quick",
+            "executed_skills": [],
+        }
+
+        result = await execute_tool_calls(state)
+
+        assert result["tool_call_count"] == 0
+        assert result["tool_results"]
+        assert "Budget Exceeded" in result["tool_results"][0]["result"]
+        assert result["tool_loop_terminated_reason"] == "budget_exceeded"
+
+
+class TestCapabilityDegradation:
+    async def test_route_finance_query_records_mode_capability_limitation(self):
+        from agent.graph import route_finance_query
+        from langchain_core.messages import HumanMessage
+
+        fake_model = MagicMock()
+        fake_model.ainvoke = AsyncMock(return_value=MagicMock(tool_calls=[], content="ok"))
+
+        state = {
+            "messages": [HumanMessage("Research AAPL and web sentiment")],
+            "agent_mode": "research",
+            "capabilities": {
+                "internet_dns_ok": False,
+                "fmp_api_key_present": True,
+                "sec_api_key_present": True,
+                "worker_reachable": True,
+            },
+            "active_skills": [],
+            "current_query": "",
+            "executed_skills": [],
+            "tool_results": [],
+        }
+
+        with patch("agent.graph._get_tool_bound_model", return_value=fake_model):
+            result = await route_finance_query(state)
+
+        assert result["degradation_events"]
+        assert any(
+            "internet access" in json.dumps(item)
+            for item in result["degradation_events"]
+        )
+        assert result["tool_results"]
+        assert result["tool_results"][0]["tool"] == "mode_capability_guard"
 
 
 # ── Issue 2: intent_router NLP routing ───────────────────────────────────────

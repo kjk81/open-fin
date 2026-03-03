@@ -208,6 +208,8 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "agent_mode": resolved_mode,
         "start_time_utc": start_time_utc,
         "capabilities": {},
+        "degradation_events": [],
+        "tool_loop_terminated_reason": "",
         "run_id": run_id,
     }
 
@@ -344,6 +346,27 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                                         "Fallback: captured tool_result for %s from %s on_chain_end",
                                         fr["tool"], name,
                                     )
+
+                        degradation_events = chain_output.get("degradation_events") or []
+                        if isinstance(degradation_events, list):
+                            for event in degradation_events:
+                                if not isinstance(event, dict):
+                                    continue
+                                message = str(event.get("message") or "Capability limitation detected")
+                                yield emit({
+                                    "type": "status",
+                                    "state": "warning",
+                                    "phase": name,
+                                    "message": message,
+                                    "verbose": True,
+                                    "run_id": run_id,
+                                    "details": {
+                                        "mode": event.get("mode"),
+                                        "disabled_tools": event.get("disabled_tools", []),
+                                        "reasons": event.get("reasons", []),
+                                        "suggestions": event.get("suggestions", []),
+                                    },
+                                })
 
                     stage_message = describe_graph_stage(name, "end")
                     if stage_message:

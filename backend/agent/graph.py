@@ -51,6 +51,7 @@ from schemas.tool_contracts import (
 )
 
 from .llm import get_llm, load_llm_settings, _effective_order_for_role, _provider_model
+from .modes import AgentMode, ModePolicy, get_mode_policy, normalize_mode
 from .nodes import capabilities_snapshot, intent_router, context_injector, generation_node
 from .prompts import get_finalize_prompt, get_router_soul_prompt
 from .skills_loader import get_skill, list_skills
@@ -66,6 +67,36 @@ MAX_TOOL_ROUNDS = 5
 _MAX_ARTIFACT_CHARS = 4_500
 _NUMERIC_RE = re.compile(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?%?")
 _REF_RE = re.compile(r"\[REF-(\d+)\]")
+
+_TOOL_CAPABILITY_REQUIREMENTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "search_web": (("internet_dns_ok", "internet access"),),
+    "fetch_webpage": (("internet_dns_ok", "internet access"),),
+    "get_social_sentiment": (("internet_dns_ok", "internet access"),),
+    "get_filings_metadata": (
+        ("internet_dns_ok", "internet access"),
+        ("sec_api_key_present", "SEC configuration"),
+    ),
+    "extract_filing_sections": (
+        ("internet_dns_ok", "internet access"),
+        ("sec_api_key_present", "SEC configuration"),
+    ),
+    "read_filings": (
+        ("internet_dns_ok", "internet access"),
+        ("sec_api_key_present", "SEC configuration"),
+    ),
+    "get_ohlcv": (("fmp_api_key_present", "FMP API access"),),
+    "get_technical_snapshot": (("fmp_api_key_present", "FMP API access"),),
+    "get_company_profile": (("fmp_api_key_present", "FMP API access"),),
+    "get_financial_statements": (("fmp_api_key_present", "FMP API access"),),
+    "get_balance_sheet": (("fmp_api_key_present", "FMP API access"),),
+    "get_institutional_holders": (("fmp_api_key_present", "FMP API access"),),
+    "get_peers": (("fmp_api_key_present", "FMP API access"),),
+    "screen_stocks": (("fmp_api_key_present", "FMP API access"),),
+}
+
+_MODE_REQUIRED_TOOLS: dict[AgentMode, set[str]] = {
+    "research": {"search_web"},
+}
 
 GRAPH_STAGE_LABELS: dict[str, tuple[str, str]] = {
     "capabilities_snapshot": ("Checking system capabilities", "Checked system capabilities"),
@@ -121,6 +152,133 @@ def _extract_sources_from_result(result_text: str) -> list[dict[str, str]]:
             continue
         out.append({"url": url, "title": title or url})
     return out
+
+
+def _resolve_mode_policy(state: AgentState) -> ModePolicy:
+    mode_raw = state.get("agent_mode") or "quick"
+    mode = normalize_mode(str(mode_raw), fallback="quick", allow_legacy=True)
+    return get_mode_policy(mode)
+
+
+def _parse_state_start_time(state: AgentState) -> datetime | None:
+    raw = state.get("start_time_utc")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        logger.warning("Invalid start_time_utc in state: %r", raw)
+        return None
+
+
+def _elapsed_seconds_since_start(state: AgentState) -> float | None:
+    start = _parse_state_start_time(state)
+    if start is None:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - start).total_seconds()
+
+
+def _budget_exceeded_payload(*, reason: str, detail: str, policy: ModePolicy, state: AgentState) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error": f"Budget Exceeded: {detail}",
+        "reason": reason,
+        "mode": policy.mode,
+        "budget": {
+            "max_tool_calls": policy.max_tool_calls,
+            "max_seconds": policy.max_seconds,
+            "tool_call_count": state.get("tool_call_count", 0),
+            "elapsed_seconds": _elapsed_seconds_since_start(state),
+        },
+        "suggested_alternative": (
+            "Ask for a narrower scope, fewer tickers, or switch to quick mode for a concise answer."
+        ),
+    }
+
+
+def _mode_capability_degradation_events(
+    *,
+    mode_policy: ModePolicy,
+    capabilities: dict[str, Any],
+    disabled_tools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+
+    if disabled_tools:
+        disabled_tool_names = [d["tool"] for d in disabled_tools]
+        reasons = sorted({reason for d in disabled_tools for reason in d["reasons"]})
+        suggestions: list[str] = []
+        if any("internet access" in reason for reason in reasons):
+            suggestions.append("Use quick or portfolio mode for local/portfolio-driven analysis without web access.")
+        if any("FMP API access" in reason for reason in reasons):
+            suggestions.append("Set FMP_API_KEY, then retry for live market and fundamentals data.")
+        if any("SEC configuration" in reason for reason in reasons):
+            suggestions.append("Set SEC_API_KEY, or provide filing excerpts directly for local analysis.")
+
+        events.append({
+            "type": "capability_degradation",
+            "mode": mode_policy.mode,
+            "disabled_tools": disabled_tool_names,
+            "reasons": reasons,
+            "message": (
+                f"Mode '{mode_policy.mode}' has limited tool access because "
+                + ", ".join(reasons)
+                + "."
+            ),
+            "suggestions": suggestions,
+        })
+
+    if mode_policy.requires_worker_reachability and not bool(capabilities.get("worker_reachable", False)):
+        events.append({
+            "type": "capability_degradation",
+            "mode": mode_policy.mode,
+            "disabled_tools": ["strategy_worker"],
+            "reasons": ["worker reachability"],
+            "message": "Strategy mode requires a reachable worker, but worker health check is failing.",
+            "suggestions": [
+                "Start the worker service and retry strategy mode.",
+                "Use research mode for analysis that does not require strategy worker execution.",
+            ],
+        })
+
+    return events
+
+
+def _apply_mode_tool_policy(
+    *,
+    mode_policy: ModePolicy,
+    tools: list,
+    capabilities: dict[str, Any],
+) -> tuple[list, list[dict[str, Any]]]:
+    allow_set = set(mode_policy.tool_allow_list)
+    policy_filtered = [t for t in tools if not allow_set or t.name in allow_set]
+
+    capability_filtered: list = []
+    disabled: list[dict[str, Any]] = []
+    for tool_obj in policy_filtered:
+        requirements = _TOOL_CAPABILITY_REQUIREMENTS.get(tool_obj.name, ())
+        missing = [label for key, label in requirements if not bool(capabilities.get(key, False))]
+        if missing:
+            disabled.append({"tool": tool_obj.name, "reasons": missing})
+            continue
+        capability_filtered.append(tool_obj)
+
+    required_tools = _MODE_REQUIRED_TOOLS.get(mode_policy.mode, set())
+    for required in sorted(required_tools):
+        if required not in {t.name for t in capability_filtered}:
+            required_reasons = [
+                label
+                for key, label in _TOOL_CAPABILITY_REQUIREMENTS.get(required, ())
+                if not bool(capabilities.get(key, False))
+            ]
+            if required_reasons:
+                already_recorded = any(d["tool"] == required for d in disabled)
+                if not already_recorded:
+                    disabled.append({"tool": required, "reasons": required_reasons})
+
+    return capability_filtered, disabled
 
 
 def _extract_numeric_tokens(text: str) -> set[str]:
@@ -631,13 +789,13 @@ def describe_graph_stage(node_name: str, phase: str) -> str | None:
     return labels[0] if phase == "start" else labels[1]
 
 
-def _get_tool_bound_model(tools: list, role: str = "subagent"):
+def _get_tool_bound_model(tools: list, role: str = "subagent", mode_policy: ModePolicy | None = None):
     """Return the first available provider model with *tools* bound.
 
     Always uses ``role="subagent"`` by default so that the tool-calling node
     gets the high-reasoning model while the finalizer uses the cheaper agent
-    model.  The full ``FINANCE_TOOLS`` list including ``load_skill`` is always
-    passed through intact.
+    model. When ``mode_policy`` is provided, tools are filtered against
+    ``ModePolicy.tool_allow_list`` before binding.
 
     Falls back to ``role="agent"`` if the subagent provider is unavailable,
     and raises a descriptive ``RuntimeError`` if the resolved model does not
@@ -654,10 +812,20 @@ def _get_tool_bound_model(tools: list, role: str = "subagent"):
         else:
             raise
 
-    logger.info("Tool-bound LLM: role=%s tools=%d", role, len(tools))
+    filtered_tools = tools
+    if mode_policy is not None:
+        allow_set = set(mode_policy.tool_allow_list)
+        filtered_tools = [t for t in tools if not allow_set or t.name in allow_set]
+
+    logger.info(
+        "Tool-bound LLM: role=%s tools=%d mode=%s",
+        role,
+        len(filtered_tools),
+        mode_policy.mode if mode_policy else "none",
+    )
 
     try:
-        return model.bind_tools(tools)
+        return model.bind_tools(filtered_tools)
     except (AttributeError, NotImplementedError) as exc:
         raise RuntimeError(
             f"LLM provider for role='{role}' does not support tool binding: {exc}"
@@ -721,9 +889,58 @@ async def route_finance_query(state: AgentState) -> dict:
     The model either makes tool calls (routed to ``execute_tool_calls``) or
     produces a final text answer (routed to ``finalize_response``).
     """
+    mode_policy = _resolve_mode_policy(state)
+    capabilities = state.get("capabilities") or {}
+    allowed_tools, disabled_tools = _apply_mode_tool_policy(
+        mode_policy=mode_policy,
+        tools=FINANCE_TOOLS,
+        capabilities=capabilities,
+    )
+    degradation_events = _mode_capability_degradation_events(
+        mode_policy=mode_policy,
+        capabilities=capabilities,
+        disabled_tools=disabled_tools,
+    )
+
+    degradation_results: list[dict[str, Any]] = []
+    for event in degradation_events:
+        degradation_results.append({
+            "tool": "mode_capability_guard",
+            "args": {"mode": mode_policy.mode},
+            "result": json.dumps({
+                "success": False,
+                "error": event["message"],
+                "mode": event["mode"],
+                "disabled_tools": event.get("disabled_tools", []),
+                "reasons": event.get("reasons", []),
+                "suggestions": event.get("suggestions", []),
+            }),
+        })
+
+    if not allowed_tools:
+        blocked = AIMessage(
+            content=(
+                "I cannot execute tools for this request because required capabilities "
+                "are unavailable. I will provide the best local-only answer and suggest alternatives."
+            )
+        )
+        return {
+            "messages": [blocked],
+            "tool_results": degradation_results,
+            "degradation_events": degradation_events,
+            "tool_loop_terminated_reason": "capability_degradation",
+        }
+
     try:
-        model = _get_tool_bound_model(FINANCE_TOOLS, role="subagent")
+        model = _get_tool_bound_model(allowed_tools, role="subagent", mode_policy=mode_policy)
         messages = _build_tool_messages(state)
+        if degradation_events:
+            degraded_notice = [
+                "CAPABILITY LIMITATION NOTICE:",
+                *[f"- {event['message']}" for event in degradation_events],
+                "Proceed with available tools only and clearly explain limitations to the user.",
+            ]
+            messages.append(SystemMessage(content="\n".join(degraded_notice)))
         response: AIMessage = await model.ainvoke(messages)
     except Exception as exc:
         logger.error(
@@ -750,12 +967,14 @@ async def route_finance_query(state: AgentState) -> dict:
                 current_query = msg.content
                 break
 
-    active: list[str] = state.get("active_skills") or [t.name for t in FINANCE_TOOLS]
+    active: list[str] = state.get("active_skills") or [t.name for t in allowed_tools]
 
     return {
         "messages": [response],
         "active_skills": active,
         "current_query": current_query,
+        "tool_results": degradation_results,
+        "degradation_events": degradation_events,
     }
 
 
@@ -767,22 +986,104 @@ async def route_finance_query(state: AgentState) -> dict:
 async def execute_tool_calls(state: AgentState) -> dict:
     """Run every tool call from the last ``AIMessage`` and return ``ToolMessage``s.
 
-    Increments ``tool_call_count`` by 1 per round (not per individual call) to
-    track how many times we have looped.  Individual tool errors are caught and
+    Increments ``tool_call_count`` per individual tool invocation and enforces
+    mode-level budgets (``max_tool_calls`` / ``max_seconds``). Individual
+    tool errors are caught and
     returned as JSON so the LLM can decide how to proceed.
     """
     last_message = state["messages"][-1]
     if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
         return {"tool_call_count": 0, "tool_results": [], "messages": []}
 
+    mode_policy = _resolve_mode_policy(state)
     tool_messages: list[ToolMessage] = []
     tool_results: list[dict] = []
     citations: list[dict] = []
 
     already_executed: set[str] = set(state.get("executed_skills", []))
     newly_executed: list[str] = []
+    executed_count = 0
 
-    for call in last_message.tool_calls:
+    def _append_budget_exceeded_messages(detail: str, reason: str, remaining_calls: list[dict[str, Any]]) -> None:
+        payload = _budget_exceeded_payload(
+            reason=reason,
+            detail=detail,
+            policy=mode_policy,
+            state=state,
+        )
+        payload_str = json.dumps(payload)
+
+        if not remaining_calls:
+            tool_results.append({
+                "tool": "budget_guard",
+                "args": {"mode": mode_policy.mode},
+                "result": payload_str,
+            })
+            return
+
+        for pending in remaining_calls:
+            pending_name = pending.get("name", "unknown_tool")
+            pending_args = pending.get("args", {})
+            pending_call_id = pending.get("id", "budget-guard")
+            per_tool_payload = {**payload, "tool": pending_name}
+            per_tool_output = json.dumps(per_tool_payload)
+            tool_messages.append(ToolMessage(content=per_tool_output, tool_call_id=pending_call_id))
+            tool_results.append({
+                "tool": pending_name,
+                "args": pending_args,
+                "result": per_tool_output,
+            })
+
+    elapsed_before = _elapsed_seconds_since_start(state)
+    if (
+        mode_policy.max_seconds is not None
+        and elapsed_before is not None
+        and elapsed_before >= mode_policy.max_seconds
+    ):
+        _append_budget_exceeded_messages(
+            detail=(
+                f"time budget reached ({elapsed_before:.1f}s >= {mode_policy.max_seconds}s)"
+            ),
+            reason="max_seconds",
+            remaining_calls=list(last_message.tool_calls),
+        )
+        return {
+            "messages": tool_messages,
+            "tool_call_count": 0,
+            "tool_results": tool_results,
+            "citations": citations,
+            "executed_skills": newly_executed,
+            "tool_loop_terminated_reason": "budget_exceeded",
+        }
+
+    for idx, call in enumerate(last_message.tool_calls):
+        total_executed = state.get("tool_call_count", 0) + executed_count
+        if mode_policy.max_tool_calls is not None and total_executed >= mode_policy.max_tool_calls:
+            _append_budget_exceeded_messages(
+                detail=(
+                    "tool call budget reached "
+                    f"({total_executed}/{mode_policy.max_tool_calls})"
+                ),
+                reason="max_tool_calls",
+                remaining_calls=list(last_message.tool_calls[idx:]),
+            )
+            break
+
+        elapsed_now = _elapsed_seconds_since_start(state)
+        if (
+            mode_policy.max_seconds is not None
+            and elapsed_now is not None
+            and elapsed_now >= mode_policy.max_seconds
+        ):
+            _append_budget_exceeded_messages(
+                detail=(
+                    f"time budget reached ({elapsed_now:.1f}s >= {mode_policy.max_seconds}s)"
+                ),
+                reason="max_seconds",
+                remaining_calls=list(last_message.tool_calls[idx:]),
+            )
+            break
+
         name: str = call["name"]
         args: dict = call["args"]
         call_id: str = call["id"]
@@ -816,19 +1117,31 @@ async def execute_tool_calls(state: AgentState) -> dict:
         tool_messages.append(ToolMessage(content=output, tool_call_id=call_id))
         tool_results.append({"tool": name, "args": args, "result": output})
         citations.extend(_extract_sources_from_result(output))
+        executed_count += 1
 
     logger.info(
-        "execute_tool_calls: executed %d tool(s), round total → %d",
-        len(tool_messages),
-        state.get("tool_call_count", 0) + 1,
+        "execute_tool_calls: executed %d tool(s), total call count → %d",
+        executed_count,
+        state.get("tool_call_count", 0) + executed_count,
     )
+
+    terminated_reason = ""
+    for entry in tool_results:
+        try:
+            parsed = json.loads(str(entry.get("result") or "{}"))
+        except Exception:
+            continue
+        if isinstance(parsed, dict) and str(parsed.get("error", "")).startswith("Budget Exceeded"):
+            terminated_reason = "budget_exceeded"
+            break
 
     return {
         "messages": tool_messages,
-        "tool_call_count": 1,              # reducer *adds* to current count
+        "tool_call_count": executed_count,  # reducer *adds* to current count
         "tool_results": tool_results,       # reducer *appends* to list
         "citations": citations,             # reducer *appends* to list
         "executed_skills": newly_executed,  # reducer *appends* to list
+        "tool_loop_terminated_reason": terminated_reason,
     }
 
 
@@ -1041,7 +1354,11 @@ def _route_after_context(state: AgentState) -> str:
     """After context injection, choose between the tool loop and generation."""
     from .mode_config import get_mode_config
 
-    agent_mode = state.get("agent_mode", "quick")
+    agent_mode = normalize_mode(
+        str(state.get("agent_mode", "quick")),
+        fallback="quick",
+        allow_legacy=True,
+    )
     cfg = get_mode_config(agent_mode)
 
     intent = state.get("intent", "general_chat")
@@ -1073,6 +1390,11 @@ def _should_continue_tools(state: AgentState) -> str:
     4. NO tool_calls AND count == 1 AND tickers known  → fallback_tool_execution
     5. otherwise                                        → finalize_response
     """
+    termination_reason = (state.get("tool_loop_terminated_reason") or "").strip().lower()
+    if termination_reason:
+        logger.info("Routing → finalize_response (tool loop terminated: %s)", termination_reason)
+        return "finalize_response"
+
     last_msg = state["messages"][-1] if state.get("messages") else None
 
     has_tool_calls = (
@@ -1087,6 +1409,29 @@ def _should_continue_tools(state: AgentState) -> str:
         "_should_continue_tools: has_tool_calls=%s count=%d tickers=%s",
         has_tool_calls, count, tickers,
     )
+
+    mode_policy = _resolve_mode_policy(state)
+    max_tool_calls = mode_policy.max_tool_calls
+    if max_tool_calls is not None and count >= max_tool_calls:
+        logger.warning(
+            "Tool-call budget reached (%d/%d). Forcing finalize.",
+            count,
+            max_tool_calls,
+        )
+        return "finalize_response"
+
+    elapsed = _elapsed_seconds_since_start(state)
+    if (
+        mode_policy.max_seconds is not None
+        and elapsed is not None
+        and elapsed >= mode_policy.max_seconds
+    ):
+        logger.warning(
+            "Time budget reached (%.2fs/%ss). Forcing finalize.",
+            elapsed,
+            mode_policy.max_seconds,
+        )
+        return "finalize_response"
 
     if has_tool_calls and count < MAX_TOOL_ROUNDS:
         logger.info("Routing → execute_tool_calls (round %d)", count + 1)

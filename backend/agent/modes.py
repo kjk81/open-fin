@@ -17,6 +17,7 @@ class ModePolicy(BaseModel):
     allowed_data_domains: list[str] = Field(default_factory=list)
     allow_broad_web_research: bool = False
     requires_worker_reachability: bool = False
+    tool_allow_list: list[str] = Field(default_factory=list)
     max_tool_calls: int | None = None
     max_seconds: int | None = None
 
@@ -28,6 +29,15 @@ MODE_POLICIES: dict[AgentMode, ModePolicy] = {
         allowed_data_domains=["knowledge_graph", "portfolio", "cached_prices"],
         allow_broad_web_research=False,
         requires_worker_reachability=False,
+        tool_allow_list=[
+            "get_ohlcv",
+            "get_technical_snapshot",
+            "get_company_profile",
+            "get_financial_statements",
+            "get_balance_sheet",
+            "get_peers",
+            "load_skill",
+        ],
         max_tool_calls=3,
         max_seconds=10,
     ),
@@ -37,6 +47,23 @@ MODE_POLICIES: dict[AgentMode, ModePolicy] = {
         allowed_data_domains=["all"],
         allow_broad_web_research=True,
         requires_worker_reachability=False,
+        tool_allow_list=[
+            "get_ohlcv",
+            "get_technical_snapshot",
+            "get_company_profile",
+            "get_financial_statements",
+            "get_balance_sheet",
+            "get_institutional_holders",
+            "get_peers",
+            "screen_stocks",
+            "get_filings_metadata",
+            "extract_filing_sections",
+            "read_filings",
+            "search_web",
+            "fetch_webpage",
+            "get_social_sentiment",
+            "load_skill",
+        ],
         max_tool_calls=8,
         max_seconds=60,
     ),
@@ -46,6 +73,17 @@ MODE_POLICIES: dict[AgentMode, ModePolicy] = {
         allowed_data_domains=["portfolio", "pricing", "balance_sheets"],
         allow_broad_web_research=False,
         requires_worker_reachability=False,
+        tool_allow_list=[
+            "get_ohlcv",
+            "get_technical_snapshot",
+            "get_company_profile",
+            "get_financial_statements",
+            "get_balance_sheet",
+            "get_institutional_holders",
+            "get_peers",
+            "screen_stocks",
+            "load_skill",
+        ],
         max_tool_calls=5,
         max_seconds=20,
     ),
@@ -55,6 +93,13 @@ MODE_POLICIES: dict[AgentMode, ModePolicy] = {
         allowed_data_domains=["strategy_workers", "backtests"],
         allow_broad_web_research=False,
         requires_worker_reachability=True,
+        tool_allow_list=[
+            "get_ohlcv",
+            "get_technical_snapshot",
+            "screen_stocks",
+            "get_company_profile",
+            "load_skill",
+        ],
         max_tool_calls=None,
         max_seconds=None,
     ),
