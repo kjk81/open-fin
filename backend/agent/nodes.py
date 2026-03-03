@@ -1,8 +1,15 @@
 from __future__ import annotations
+import asyncio
+import os
 import re
+import socket
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from sqlalchemy.exc import OperationalError
+
+from database import SessionLocal
+from models import WorkerStatus
 from .state import ChatState
 from .llm import get_llm
 
@@ -61,6 +68,78 @@ _PERFORMANCE_KEYWORDS = frozenset({
     "gained", "lost", "rally", "drop", "movement",
     "trend", "momentum", "up today", "down today",
 })
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _check_fmp_api_key_present() -> bool:
+    return bool(os.getenv("FMP_API_KEY", "").strip())
+
+
+def _check_sec_configured() -> bool:
+    # Open-Fin uses public EDGAR endpoints and does not require an SEC API key.
+    return True
+
+
+def _check_worker_reachable() -> bool:
+    db = SessionLocal()
+    try:
+        row = db.query(WorkerStatus).order_by(WorkerStatus.last_heartbeat.desc()).first()
+    except OperationalError:
+        return False
+    finally:
+        db.close()
+
+    if not row or row.last_heartbeat is None:
+        return False
+
+    heartbeat = row.last_heartbeat
+    if heartbeat.tzinfo is None:
+        heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+
+    stale = (datetime.now(timezone.utc) - heartbeat).total_seconds() > 90
+    return row.status == "running" and not stale
+
+
+def _check_internet_dns() -> bool:
+    try:
+        socket.getaddrinfo("example.com", 443)
+        return True
+    except OSError:
+        return False
+
+
+async def capabilities_snapshot(state: ChatState) -> dict:
+    """Capture a lightweight runtime capability snapshot for early UI health display."""
+    checked_at = _now_iso()
+
+    internet_ok = await asyncio.to_thread(_check_internet_dns)
+    worker_ok = await asyncio.to_thread(_check_worker_reachable)
+    fmp_ok = _check_fmp_api_key_present()
+    sec_ok = _check_sec_configured()
+
+    capabilities = {
+        "internet_dns_ok": internet_ok,
+        "internet_checked_at": checked_at,
+        "fmp_api_key_present": fmp_ok,
+        "fmp_checked_at": checked_at,
+        "sec_api_key_present": sec_ok,
+        "sec_checked_at": checked_at,
+        "worker_reachable": worker_ok,
+        "worker_checked_at": checked_at,
+        "snapshot_at": checked_at,
+    }
+
+    logger.info(
+        "CapabilitiesSnapshot: internet_dns_ok=%s fmp_api_key_present=%s sec_api_key_present=%s worker_reachable=%s",
+        internet_ok,
+        fmp_ok,
+        sec_ok,
+        worker_ok,
+    )
+    return {"capabilities": capabilities}
 
 
 # ---------------------------------------------------------------------------

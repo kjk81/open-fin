@@ -51,7 +51,7 @@ from schemas.tool_contracts import (
 )
 
 from .llm import get_llm, load_llm_settings, _effective_order_for_role, _provider_model
-from .nodes import intent_router, context_injector, generation_node
+from .nodes import capabilities_snapshot, intent_router, context_injector, generation_node
 from .prompts import get_finalize_prompt, get_router_soul_prompt
 from .skills_loader import get_skill, list_skills
 from .state import AgentState
@@ -68,6 +68,7 @@ _NUMERIC_RE = re.compile(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?%?")
 _REF_RE = re.compile(r"\[REF-(\d+)\]")
 
 GRAPH_STAGE_LABELS: dict[str, tuple[str, str]] = {
+    "capabilities_snapshot": ("Checking system capabilities", "Checked system capabilities"),
     "route_finance_query": ("Planning required data fetches", "Planned data fetches"),
     "execute_tool_calls": ("Executing finance data tools", "Executed finance data tools"),
     "force_tool_retry": ("Forcing tool usage", "Forced tool usage"),
@@ -1147,6 +1148,7 @@ def build_graph():
     builder = StateGraph(AgentState)
 
     # -- Nodes --
+    builder.add_node("capabilities_snapshot", capabilities_snapshot)
     builder.add_node("intent_router", intent_router)
     builder.add_node("context_injector", context_injector)
     builder.add_node("generation_node", generation_node)
@@ -1157,7 +1159,8 @@ def build_graph():
     builder.add_node("finalize_response", finalize_response)
 
     # -- Edges --
-    builder.add_edge(START, "intent_router")
+    builder.add_edge(START, "capabilities_snapshot")
+    builder.add_edge("capabilities_snapshot", "intent_router")
     builder.add_edge("intent_router", "context_injector")
 
     builder.add_conditional_edges(

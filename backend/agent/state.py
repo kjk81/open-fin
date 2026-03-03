@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -94,8 +94,8 @@ class AgentState(TypedDict):
     # Increment semantics are handled by graph/tool nodes.
     external_call_count: Annotated[int, operator.add]
 
-    # Point-in-time capability snapshot (e.g. worker reachability, feature flags).
-    capabilities: dict[str, bool]
+    # Point-in-time capability snapshot (health flags + per-check timestamps).
+    capabilities: dict[str, Any]
 
     # UUID of the persisted AgentRun record for this invocation.
     # Written once at stream start — no reducer needed.

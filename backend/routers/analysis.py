@@ -231,9 +231,7 @@ async def _run_mini_graph(ticker: str, section: str) -> dict[str, Any]:
         "tool_results": [],
         "agent_mode": resolve_requested_mode(None, section),
         "start_time_utc": datetime.now(timezone.utc).isoformat(),
-        "capabilities": {
-            "worker_reachable": False,
-        },
+        "capabilities": {},
     }
 
     # Collect the final response

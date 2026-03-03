@@ -207,9 +207,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "citations": [],
         "agent_mode": resolved_mode,
         "start_time_utc": start_time_utc,
-        "capabilities": {
-            "worker_reachable": False,
-        },
+        "capabilities": {},
         "run_id": run_id,
     }
 
@@ -321,6 +319,15 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     # Previously only checked execute_tool_calls (RC6); now generic.
                     chain_output = data.get("output") or {}
                     if isinstance(chain_output, dict):
+                        snapshot = chain_output.get("capabilities")
+                        if isinstance(snapshot, dict) and snapshot:
+                            yield emit({
+                                "type": "capabilities",
+                                "phase": name,
+                                "run_id": run_id,
+                                "capabilities": snapshot,
+                            })
+
                         fallback_results = chain_output.get("tool_results") or []
                         if fallback_results:
                             existing_keys = {

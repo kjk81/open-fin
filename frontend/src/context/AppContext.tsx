@@ -806,6 +806,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
         );
       },
       agentMode ?? state.agentMode,
+      (capEvent) => {
+        const c = capEvent.capabilities ?? {};
+        const internetOk = c["internet_dns_ok"] === true;
+        const fmpOk = c["fmp_api_key_present"] === true;
+        const secOk = c["sec_api_key_present"] === true;
+        const workerOk = c["worker_reachable"] === true;
+
+        const summary =
+          `System health: DNS ${internetOk ? "ok" : "down"}, ` +
+          `FMP ${fmpOk ? "configured" : "missing"}, ` +
+          `SEC ${secOk ? "configured" : "missing"}, ` +
+          `Worker ${workerOk ? "online" : "offline"}`;
+
+        dispatch({
+          type: "UPDATE_AGENT_STEP",
+          step: {
+            seq: capEvent.seq ?? Number.MIN_SAFE_INTEGER,
+            stepId: "stage-capabilities-snapshot",
+            message: summary,
+            state: "done",
+            category: "stage",
+          },
+        });
+
+        termLog("status", "info", summary, capEvent.phase ? `phase=${capEvent.phase}` : undefined);
+      },
     );
   }, [termLog, state.debugMode, state.agentMode]);
 

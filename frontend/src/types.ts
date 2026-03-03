@@ -106,6 +106,13 @@ export interface AgentProgressEvent {
   verbose?: boolean;
 }
 
+export interface CapabilitiesSnapshotEvent {
+  seq?: number;
+  runId?: string;
+  phase?: string;
+  capabilities: Record<string, unknown>;
+}
+
 export interface ToolProvenance {
   source?: string;
   retrieved_at?: string;

@@ -29,6 +29,7 @@ import type {
   TickerNote,
   PaginatedTickerNotes,
   GraphConnectionsSummary,
+  CapabilitiesSnapshotEvent,
 } from "./types";
 
 // Mutable base URL — updated by initApiBase() before the React tree renders.
@@ -392,6 +393,7 @@ export async function streamChat(
   onKgUpdate?: (nodesCreated: number, edgesCreated: number, error?: string) => void,
   onProgressEvent?: (event: import("./types").AgentProgressEvent) => void,
   agentMode?: AgentMode,
+  onCapabilities?: (event: CapabilitiesSnapshotEvent) => void,
 ): Promise<void> {
   let res: Response;
   try {
@@ -510,6 +512,16 @@ export async function streamChat(
         onSources(event.sources ?? []);
       } else if (event.type === "kg_update" && onKgUpdate) {
         onKgUpdate(event.nodes_created ?? 0, event.edges_created ?? 0, event.error);
+      } else if (event.type === "capabilities" && onCapabilities) {
+        onCapabilities({
+          seq: typeof event.seq === "number" ? event.seq : undefined,
+          runId: typeof event.run_id === "string" ? event.run_id : undefined,
+          phase: typeof event.phase === "string" ? event.phase : undefined,
+          capabilities:
+            event.capabilities && typeof event.capabilities === "object"
+              ? event.capabilities
+              : {},
+        });
       } else if ((event.type === "step" || event.type === "status") && onProgressEvent) {
         const rawState = event.state;
         const state =

@@ -453,6 +453,49 @@ describe("streamChat", () => {
     expect(onDone).toHaveBeenCalledOnce();
   });
 
+  it("calls onCapabilities when capabilities SSE event is received", async () => {
+    const { onDone } = makeCallbacks();
+    const onCapabilities = vi.fn();
+    const capabilities = {
+      internet_dns_ok: true,
+      fmp_api_key_present: false,
+      sec_api_key_present: true,
+      worker_reachable: false,
+      snapshot_at: "2026-03-03T00:00:00Z",
+    };
+
+    vi.mocked(fetch).mockResolvedValue(
+      mockSseResponse([
+        sseData({ type: "capabilities", seq: 3, run_id: "r-1", phase: "capabilities_snapshot", capabilities }),
+        sseData({ type: "done" }),
+      ]),
+    );
+
+    await streamChat(
+      "hi",
+      "s1",
+      [],
+      vi.fn(),
+      onDone,
+      vi.fn(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onCapabilities,
+    );
+
+    expect(onCapabilities).toHaveBeenCalledWith({
+      seq: 3,
+      runId: "r-1",
+      phase: "capabilities_snapshot",
+      capabilities,
+    });
+    expect(onDone).toHaveBeenCalledOnce();
+  });
+
   // ── 10b. step/status progress events ───────────────────────────────────
 
   it("calls onProgressEvent for step and status SSE events", async () => {
