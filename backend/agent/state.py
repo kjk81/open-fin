@@ -6,6 +6,8 @@ from typing import Annotated, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
+from .modes import AgentMode
+
 
 class ChatState(TypedDict):
     """Legacy chat state — kept for backward-compatible nodes (generation_node, etc.)."""
@@ -80,9 +82,20 @@ class AgentState(TypedDict):
     screening_results: dict
     filings_context: str
 
-    # Agent mode: "genie" | "fundamentals" | "sentiment" | "technical"
+    # Agent mode: "quick" | "research" | "portfolio" | "strategy"
     # Written once at start — no reducer needed.
-    agent_mode: str
+    agent_mode: AgentMode
+
+    # UTC timestamp captured when the agent run starts.
+    # Used to derive elapsed wall-clock budget for mode policy checks.
+    start_time_utc: str
+
+    # Number of external/network-heavy tool invocations observed for this run.
+    # Increment semantics are handled by graph/tool nodes.
+    external_call_count: Annotated[int, operator.add]
+
+    # Point-in-time capability snapshot (e.g. worker reachability, feature flags).
+    capabilities: dict[str, bool]
 
     # UUID of the persisted AgentRun record for this invocation.
     # Written once at stream start — no reducer needed.

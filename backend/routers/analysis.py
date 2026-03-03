@@ -32,6 +32,7 @@ from fastapi.responses import StreamingResponse
 
 from agent.kg_reader import get_kg_fundamentals, get_kg_sentiment, get_kg_technical
 from agent.llm import get_llm
+from agent.modes import resolve_requested_mode
 from agent.ollama_queue import ollama_analysis_slot
 from database import SessionLocal
 from models import AnalysisSectionCache
@@ -226,8 +227,13 @@ async def _run_mini_graph(ticker: str, section: str) -> dict[str, Any]:
         "current_query": "",
         "active_skills": [],
         "tool_call_count": 0,
+        "external_call_count": 0,
         "tool_results": [],
-        "agent_mode": section,
+        "agent_mode": resolve_requested_mode(None, section),
+        "start_time_utc": datetime.now(timezone.utc).isoformat(),
+        "capabilities": {
+            "worker_reachable": False,
+        },
     }
 
     # Collect the final response

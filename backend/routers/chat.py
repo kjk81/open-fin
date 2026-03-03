@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from agent.graph import describe_graph_stage, graph
 from agent.knowledge_graph import upsert_from_tool_results
+from agent.modes import resolve_requested_mode
 from database import SessionLocal
 from models import AgentRun, AgentRunEvent, ChatHistory
 from datetime import datetime, timezone
@@ -134,24 +135,25 @@ def _validate_context_refs(v: list[str]) -> list[str]:
     return v
 
 
-_VALID_AGENT_MODES: frozenset[str] = frozenset({"genie", "fundamentals", "sentiment", "technical"})
-
-
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4096)
     session_id: str = Field(..., min_length=1, max_length=64)
     context_refs: list[str] = Field(default_factory=list)
-    agent_mode: str = Field(default="genie")
+    mode: str | None = Field(default=None)
+    agent_mode: str | None = Field(default=None)
 
     _check_session_id = field_validator("session_id")(_validate_session_id)
     _check_context_refs = field_validator("context_refs")(_validate_context_refs)
 
-    @field_validator("agent_mode")
+    @field_validator("mode", "agent_mode")
     @classmethod
-    def _check_agent_mode(cls, v: str) -> str:
+    def _check_mode_values(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
         v = v.strip().lower()
-        if v not in _VALID_AGENT_MODES:
-            raise ValueError(f"agent_mode must be one of {sorted(_VALID_AGENT_MODES)}")
+        if not v:
+            return None
+        resolve_requested_mode(v, None)
         return v
 
 
@@ -184,7 +186,9 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     """
     # Create a persistent AgentRun record before streaming starts (synchronous,
     # fast single INSERT — run_id is needed before any _fire_event calls).
-    run_id = _create_run(request.session_id, request.agent_mode)
+    resolved_mode = resolve_requested_mode(request.mode, request.agent_mode)
+    run_id = _create_run(request.session_id, resolved_mode)
+    start_time_utc = datetime.now(timezone.utc).isoformat()
 
     initial_state: dict = {
         "messages": [HumanMessage(content=request.message)],
@@ -198,9 +202,14 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "current_query": "",
         "active_skills": [],
         "tool_call_count": 0,
+        "external_call_count": 0,
         "tool_results": [],
         "citations": [],
-        "agent_mode": request.agent_mode,
+        "agent_mode": resolved_mode,
+        "start_time_utc": start_time_utc,
+        "capabilities": {
+            "worker_reachable": False,
+        },
         "run_id": run_id,
     }
 

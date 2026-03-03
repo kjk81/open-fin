@@ -671,7 +671,7 @@ def _get_tool_bound_model(tools: list, role: str = "subagent"):
 def _build_tool_messages(state: AgentState) -> list[BaseMessage]:
     """System prompt + full state-message replay for ``route_finance_query``."""
 
-    agent_mode = state.get("agent_mode", "genie")
+    agent_mode = state.get("agent_mode", "quick")
     parts: list[str] = [get_router_soul_prompt(agent_mode=agent_mode)]
 
     injected = state.get("injected_context", "")
@@ -870,7 +870,7 @@ async def finalize_response(state: AgentState) -> dict:
     artifact_block = _format_artifacts_for_prompt(artifacts)
 
     # --- Build synthesis prompt with only query + artifacts/citations ---
-    agent_mode = state.get("agent_mode", "genie")
+    agent_mode = state.get("agent_mode", "quick")
     ctx_parts: list[str] = [get_finalize_prompt(agent_mode=agent_mode)]
     ctx_parts.append("\n\nSTANDARDIZED_ARTIFACTS (cite as [REF-n]):\n" + artifact_block)
 
@@ -1040,7 +1040,7 @@ def _route_after_context(state: AgentState) -> str:
     """After context injection, choose between the tool loop and generation."""
     from .mode_config import get_mode_config
 
-    agent_mode = state.get("agent_mode", "genie")
+    agent_mode = state.get("agent_mode", "quick")
     cfg = get_mode_config(agent_mode)
 
     intent = state.get("intent", "general_chat")
