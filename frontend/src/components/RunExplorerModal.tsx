@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
-import { fetchRun, fetchRunEvents } from "../api";
-import type { AgentRunEvent, AgentRunSummary, StateWritePayload } from "../types";
+import { useEffect, useMemo, useState } from "react";
+import { downloadRunBundle, fetchRun, fetchRunBundle, fetchRunEvents } from "../api";
+import { useAppContext } from "../context/AppContext";
+import type { AgentRunBundle, AgentRunEvent, AgentRunSummary, StateWritePayload } from "../types";
+import { TraceViewer } from "./TraceViewer";
 
 interface Props {
   runId: string;
@@ -66,10 +68,21 @@ function StateWriteEventRow({ event, payload }: { event: AgentRunEvent; payload:
 }
 
 export function RunExplorerModal({ runId, onClose }: Props) {
+  const { state } = useAppContext();
   const [run, setRun] = useState<AgentRunSummary | null>(null);
   const [events, setEvents] = useState<AgentRunEvent[]>([]);
+  const [bundle, setBundle] = useState<AgentRunBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [bundleLoading, setBundleLoading] = useState(false);
+  const [bundleError, setBundleError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
+
+  const showTraceViewer = useMemo(
+    () => import.meta.env.DEV || state.debugMode,
+    [state.debugMode],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -96,15 +109,71 @@ export function RunExplorerModal({ runId, onClose }: Props) {
     };
   }, [runId]);
 
+  useEffect(() => {
+    if (!showTraceViewer) {
+      setBundle(null);
+      setBundleError(null);
+      setBundleLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setBundleLoading(true);
+    setBundleError(null);
+
+    fetchRunBundle(runId)
+      .then((runBundle) => {
+        if (cancelled) return;
+        setBundle(runBundle);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBundleError(String(err));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setBundleLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, showTraceViewer]);
+
+  const handleDownloadBundle = async () => {
+    setDownloadStatus(null);
+    setDownloading(true);
+    try {
+      const result = await downloadRunBundle(runId);
+      if (result.canceled) {
+        setDownloadStatus("Download canceled.");
+      } else if (result.path) {
+        setDownloadStatus(`Saved: ${result.path}`);
+      } else {
+        setDownloadStatus("Bundle downloaded.");
+      }
+    } catch (err) {
+      setDownloadStatus(`Download failed: ${String(err)}`);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-card run-explorer-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-title">Run Explorer</div>
+        <div className="run-explorer-header">
+          <div className="modal-title">Run Explorer</div>
+          <button className="btn-ghost" onClick={handleDownloadBundle} disabled={downloading}>
+            {downloading ? "Downloading…" : "Download Bundle"}
+          </button>
+        </div>
         <div className="run-explorer-meta">
           <div><strong>Run ID:</strong> {runId}</div>
           {run && <div><strong>Status:</strong> {run.status}</div>}
           {run && <div><strong>Mode:</strong> {run.mode}</div>}
         </div>
+        {downloadStatus && <div className="run-explorer-loading">{downloadStatus}</div>}
 
         {loading && <div className="run-explorer-loading">Loading run events…</div>}
         {error && <div className="run-explorer-error">{error}</div>}
@@ -129,6 +198,10 @@ export function RunExplorerModal({ runId, onClose }: Props) {
             {events.length === 0 && <div className="run-explorer-loading">No events found.</div>}
           </div>
         )}
+
+        {showTraceViewer && bundleLoading && <div className="run-explorer-loading">Loading trace bundle…</div>}
+        {showTraceViewer && bundleError && <div className="run-explorer-error">{bundleError}</div>}
+        {showTraceViewer && bundle && <TraceViewer runId={runId} bundle={bundle} />}
 
         <div className="modal-actions">
           <button className="btn-ghost" onClick={onClose}>Close</button>

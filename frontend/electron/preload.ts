@@ -17,4 +17,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("window-close"),
   wipeUserData: (): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke("wipe-user-data"),
+  saveRunBundle: (payload: { defaultPath: string; contents: string }): Promise<{
+    canceled: boolean;
+    path?: string;
+    error?: string;
+  }> => ipcRenderer.invoke("save-run-bundle", payload),
 });

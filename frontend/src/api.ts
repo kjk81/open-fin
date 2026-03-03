@@ -23,6 +23,7 @@ import type {
   AnalysisSectionName,
   AgentMode,
   AgentRunEventsResponse,
+  AgentRunBundle,
   AgentRunSummary,
   DashboardMetrics,
   TickerEventsResponse,
@@ -418,6 +419,52 @@ export async function fetchRunEvents(
   const res = await fetch(`${API}/api/runs/${encodeURIComponent(runId)}/events?${qs}`);
   if (!res.ok) throw new Error(`Run events fetch failed: ${res.status}`);
   return res.json();
+}
+
+export async function fetchRunBundle(runId: string): Promise<AgentRunBundle> {
+  const res = await fetch(`${API}/api/runs/${encodeURIComponent(runId)}/export`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `Run bundle fetch failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+function buildRunBundleFilename(runId: string): string {
+  const suffix = new Date().toISOString().replace(/[:.]/g, "-");
+  return `run-${runId}-bundle-${suffix}.json`;
+}
+
+export async function downloadRunBundle(runId: string): Promise<{ canceled: boolean; path?: string }> {
+  const bundle = await fetchRunBundle(runId);
+  const filename = buildRunBundleFilename(runId);
+  const contents = `${JSON.stringify(bundle, null, 2)}\n`;
+
+  const saveRunBundle = window.electronAPI?.saveRunBundle;
+  if (typeof saveRunBundle === "function") {
+    const result = await saveRunBundle({
+      defaultPath: filename,
+      contents,
+    });
+    if (result.error) {
+      throw new Error(result.error);
+    }
+    return { canceled: !!result.canceled, path: result.path };
+  }
+
+  const blob = new Blob([contents], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+
+  return { canceled: false };
 }
 
 export async function streamChat(

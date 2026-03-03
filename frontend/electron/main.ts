@@ -500,6 +500,37 @@ ipcMain.handle("wipe-user-data", (): { success: boolean; error?: string } => {
   }
 });
 
+ipcMain.handle(
+  "save-run-bundle",
+  async (
+    _event,
+    payload: { defaultPath?: string; contents?: string } | undefined,
+  ): Promise<{ canceled: boolean; path?: string; error?: string }> => {
+    const defaultPath = typeof payload?.defaultPath === "string" && payload.defaultPath.trim().length > 0
+      ? payload.defaultPath
+      : `run-bundle-${Date.now()}.json`;
+    const contents = typeof payload?.contents === "string" ? payload.contents : "";
+
+    try {
+      const result = await dialog.showSaveDialog(mainWindow ?? undefined, {
+        title: "Save Run Bundle",
+        defaultPath: path.join(app.getPath("downloads"), defaultPath),
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+
+      if (result.canceled || !result.filePath) {
+        return { canceled: true };
+      }
+
+      fs.writeFileSync(result.filePath, contents, "utf-8");
+      return { canceled: false, path: result.filePath };
+    } catch (err) {
+      log.error("save-run-bundle failed:", err);
+      return { canceled: false, error: String(err) };
+    }
+  },
+);
+
 // ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------

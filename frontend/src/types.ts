@@ -508,6 +508,58 @@ export interface AgentRunEventsResponse {
   items: AgentRunEvent[];
 }
 
+export interface AgentRunExportEvent {
+  id: number;
+  run_id: string;
+  seq: number;
+  type: string;
+  payload: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
+export interface RunBundleContextSnapshotRow {
+  id: number;
+  run_id: string;
+  category: string;
+  content: Record<string, unknown>;
+  citations: Record<string, unknown>[];
+  tags: string[];
+  confidence: number | null;
+  expires_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface RunBundleContextSnapshots {
+  portfolio_snapshots: RunBundleContextSnapshotRow[];
+  user_preferences: RunBundleContextSnapshotRow[];
+  episodic_summaries: RunBundleContextSnapshotRow[];
+  research_library: RunBundleContextSnapshotRow[];
+}
+
+export interface RunBundleArtifact {
+  artifact_type: string;
+  event_id: number | null;
+  seq: number | null;
+  created_at: string | null;
+  tool?: string;
+  tool_call_id?: string;
+  step_id?: string;
+  success?: boolean;
+  result_envelope?: Record<string, unknown> | null;
+  data?: unknown;
+}
+
+export interface AgentRunBundle {
+  bundle_version: string;
+  exported_at: string;
+  run_header: AgentRunSummary;
+  event_timeline: AgentRunExportEvent[];
+  context_snapshots: RunBundleContextSnapshots;
+  artifacts_registry: RunBundleArtifact[];
+  citations: Record<string, unknown>[];
+}
+
 // ── Action Confirmation ──────────────────────────────────────────────────────
 
 export type ActionCategory =

@@ -11,6 +11,11 @@ declare global {
       toggleMaximizeWindow: () => Promise<boolean>;
       closeWindow: () => Promise<void>;
       wipeUserData: () => Promise<{ success: boolean; error?: string }>;
+      saveRunBundle: (payload: { defaultPath: string; contents: string }) => Promise<{
+        canceled: boolean;
+        path?: string;
+        error?: string;
+      }>;
     };
   }
 }
