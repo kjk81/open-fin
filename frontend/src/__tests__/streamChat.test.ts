@@ -603,6 +603,7 @@ describe("streamChat", () => {
           message: "analyse AAPL",
           session_id: "sess-42",
           context_refs: ["AAPL", "MSFT"],
+          agent_mode: "genie",
         }),
       }),
     );

@@ -13,6 +13,26 @@ export interface TickerInfo {
   beta: number | null;
 }
 
+export interface DashboardStockMetric {
+  symbol: string;
+  trailing_pe: number | null;
+  agent_score: number;
+}
+
+export interface DashboardMetrics {
+  best_pe: DashboardStockMetric[];
+  best_agent_score: DashboardStockMetric[];
+}
+
+export interface TickerEventItem {
+  title: string;
+  url: string;
+  snippet: string;
+  provider: string;
+  rank: number;
+  occurred_at: string;
+}
+
 export interface PortfolioPosition {
   symbol: string;
   qty: number;
@@ -268,6 +288,26 @@ export interface SettingValue {
 }
 
 export type SettingsValues = Record<string, SettingValue>;
+
+// ── Agent Modes + Analysis ──────────────────────────────────────────────────
+
+export type AgentMode = "genie" | "fundamentals" | "sentiment" | "technical";
+
+export type AnalysisSectionName = "fundamentals" | "sentiment" | "technical";
+
+export interface AnalysisSectionData {
+  rating: string;
+  content: string;
+  source: string;
+  loading: boolean;
+}
+
+export interface TickerAnalysis {
+  sections: Partial<Record<AnalysisSectionName, AnalysisSectionData>>;
+  overallRating: string | null;
+  loading: boolean;
+  error: string | null;
+}
 
 // ── Agent Terminal ────────────────────────────────────────────────────────────
 

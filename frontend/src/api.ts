@@ -20,6 +20,10 @@ import type {
   StrategyInfo,
   SettingSchema,
   SettingsValues,
+  AnalysisSectionName,
+  AgentMode,
+  DashboardMetrics,
+  TickerEventItem,
 } from "./types";
 
 // Mutable base URL — updated by initApiBase() before the React tree renders.
@@ -83,6 +87,18 @@ export async function wipeData(scope: "all" | "db" | "faiss" = "all"): Promise<b
 export async function fetchTicker(symbol: string): Promise<TickerInfo> {
   const res = await fetch(`${API}/api/ticker/${encodeURIComponent(symbol)}`);
   if (!res.ok) throw new Error(`Ticker fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDashboardMetrics(): Promise<DashboardMetrics> {
+  const res = await fetch(`${API}/api/dashboard/metrics`);
+  if (!res.ok) throw new Error(`Dashboard metrics fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTickerEvents(symbol: string): Promise<TickerEventItem[]> {
+  const res = await fetch(`${API}/api/ticker/${encodeURIComponent(symbol)}/events`);
+  if (!res.ok) throw new Error(`Ticker events fetch failed: ${res.status}`);
   return res.json();
 }
 
@@ -305,13 +321,19 @@ export async function streamChat(
   onSources?: (sources: import("./types").SourceRef[]) => void,
   onKgUpdate?: (nodesCreated: number, edgesCreated: number, error?: string) => void,
   onProgressEvent?: (event: import("./types").AgentProgressEvent) => void,
+  agentMode?: AgentMode,
 ): Promise<void> {
   let res: Response;
   try {
     res = await fetch(`${API}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, session_id: sessionId, context_refs: contextRefs }),
+      body: JSON.stringify({
+        message,
+        session_id: sessionId,
+        context_refs: contextRefs,
+        agent_mode: agentMode ?? "genie",
+      }),
       signal,
     });
     if (!res.ok) {
@@ -461,6 +483,94 @@ export async function streamChat(
     reader.releaseLock();
     // Safety net: if the stream ended without emitting done or error
     // (e.g. network drop, server crash), resolve the loading state.
+    if (!settled) onDone();
+  }
+}
+
+// ── Analysis SSE ────────────────────────────────────────────────────────────
+
+export async function streamAnalysis(
+  ticker: string,
+  onSection: (section: AnalysisSectionName, content: string, rating: string, source: string) => void,
+  onOverallRating: (rating: string) => void,
+  onDone: () => void,
+  onError: (err: string) => void,
+  signal?: AbortSignal,
+  onStatus?: (message: string) => void,
+): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(`${API}/api/analysis/${encodeURIComponent(ticker)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      onError(text || `HTTP ${res.status}`);
+      return;
+    }
+  } catch (e) {
+    if ((e as Error).name === "AbortError") return;
+    onError(String(e));
+    return;
+  }
+
+  if (!res.body) {
+    onError("No response body");
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let settled = false;
+
+  const dispatch = (part: string) => {
+    const match = part.match(/^data:\s*(.+)$/m);
+    if (!match) return;
+    try {
+      const event = JSON.parse(match[1]);
+      if (event.type === "section_ready") {
+        onSection(
+          event.section as AnalysisSectionName,
+          typeof event.content === "string" ? event.content : "",
+          typeof event.rating === "string" ? event.rating : "",
+          typeof event.source === "string" ? event.source : "llm",
+        );
+      } else if (event.type === "overall_rating") {
+        onOverallRating(typeof event.rating === "string" ? event.rating : "Neutral");
+      } else if (event.type === "done") {
+        settled = true;
+        onDone();
+      } else if (event.type === "error") {
+        settled = true;
+        onError(typeof event.message === "string" ? event.message : "Analysis failed");
+      } else if (event.type === "status" && onStatus) {
+        onStatus(typeof event.message === "string" ? event.message : "");
+      }
+    } catch {
+      // ignore malformed JSON
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) dispatch(part);
+    }
+    if (buffer.trim()) dispatch(buffer);
+  } catch (e) {
+    if ((e as Error).name !== "AbortError") {
+      settled = true;
+      onError(String(e));
+    }
+  } finally {
+    reader.releaseLock();
     if (!settled) onDone();
   }
 }

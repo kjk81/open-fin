@@ -1,6 +1,10 @@
 import logging
+from datetime import datetime, timezone
+
 import yfinance as yf
 from fastapi import APIRouter, HTTPException
+
+from tools.web import web_search
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,3 +48,26 @@ def get_ticker(symbol: str):
     except Exception as exc:
         logger.error("Ticker lookup failed for %s: %s", symbol, exc)
         raise HTTPException(status_code=502, detail=f"Failed to fetch data for {symbol}: {exc}")
+
+
+@router.get("/ticker/{symbol}/events")
+async def get_ticker_events(symbol: str):
+    symbol = symbol.upper()
+    query = f"{symbol} stock news current events"
+    search_result = await web_search(query=query, max_results=10)
+
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    hits = search_result.data.hits if search_result.success else []
+    provider = search_result.data.provider
+
+    return [
+        {
+            "title": hit.title,
+            "url": str(hit.url),
+            "snippet": hit.snippet,
+            "provider": provider,
+            "rank": idx + 1,
+            "occurred_at": occurred_at,
+        }
+        for idx, hit in enumerate(hits)
+    ]

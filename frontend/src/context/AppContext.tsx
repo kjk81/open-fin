@@ -8,7 +8,9 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  AgentMode,
   AgentStep,
+  AnalysisSectionName,
   BackendStatus,
   ChatMessage,
   PortfolioPosition,
@@ -16,6 +18,7 @@ import type {
   TerminalLogEntry,
   TerminalLogLevel,
   TerminalLogType,
+  TickerAnalysis,
   TickerInfo,
   ToolEvent,
   WatchlistItem,
@@ -25,6 +28,7 @@ import {
   fetchPortfolio,
   fetchTicker,
   postSystemEvent,
+  streamAnalysis,
   streamChat,
   fetchWatchlist,
   addToWatchlist,
@@ -45,16 +49,23 @@ interface AppState {
   activeTickerError: string | null;
   chatMessages: ChatMessage[];
   chatStreaming: boolean;
-  tickerReport: string;
-  tickerReportLoading: boolean;
-  tickerReportError: string | null;
+  tickerAnalysis: TickerAnalysis;
   selectedSymbol: string | null;
+  viewMode: "dashboard" | "ticker";
   terminalLogs: TerminalLogEntry[];
   terminalOpen: boolean;
   kgLastUpdated: number;
   kgLastTicker: string | null;
   debugMode: boolean;
+  agentMode: AgentMode;
 }
+
+const _EMPTY_ANALYSIS: TickerAnalysis = {
+  loading: false,
+  error: null,
+  overallRating: null,
+  sections: {},
+};
 
 const initialState: AppState = {
   backendStatus: "connecting",
@@ -67,15 +78,15 @@ const initialState: AppState = {
   activeTickerError: null,
   chatMessages: [],
   chatStreaming: false,
-  tickerReport: "",
-  tickerReportLoading: false,
-  tickerReportError: null,
+  tickerAnalysis: { ..._EMPTY_ANALYSIS },
   selectedSymbol: null,
+  viewMode: "dashboard",
   terminalLogs: [],
   terminalOpen: false,
   kgLastUpdated: 0,
   kgLastTicker: null,
   debugMode: typeof localStorage !== "undefined" && localStorage.getItem("open-fin-debug-mode") === "true",
+  agentMode: "genie",
 };
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -90,6 +101,7 @@ type Action =
   | { type: "SET_ACTIVE_TICKER_LOADING"; loading: boolean }
   | { type: "SET_ACTIVE_TICKER_ERROR"; error: string | null }
   | { type: "SET_SELECTED_SYMBOL"; symbol: string | null }
+  | { type: "SET_VIEW_MODE"; viewMode: "dashboard" | "ticker" }
   | { type: "ADD_CHAT_MESSAGE"; message: ChatMessage }
   | { type: "APPEND_TO_LAST_MESSAGE"; content: string }
   | { type: "SET_CHAT_STREAMING"; streaming: boolean }
@@ -98,10 +110,12 @@ type Action =
   | { type: "SET_LAST_ASSISTANT_STATUS"; status: "streaming" | "complete" | "incomplete" }
   | { type: "FINALIZE_RUNNING_STEPS" }
   | { type: "SET_LAST_MESSAGE_SOURCES"; sources: SourceRef[] }
-  | { type: "SET_TICKER_REPORT"; report: string }
-  | { type: "APPEND_TICKER_REPORT"; content: string }
-  | { type: "SET_TICKER_REPORT_LOADING"; loading: boolean }
-  | { type: "SET_TICKER_REPORT_ERROR"; error: string | null }
+  | { type: "SET_TICKER_ANALYSIS_LOADING"; loading: boolean }
+  | { type: "SET_TICKER_ANALYSIS_SECTION"; section: AnalysisSectionName; content: string; rating: string; source: string }
+  | { type: "SET_TICKER_ANALYSIS_OVERALL"; rating: string }
+  | { type: "SET_TICKER_ANALYSIS_ERROR"; error: string | null }
+  | { type: "CLEAR_TICKER_ANALYSIS" }
+  | { type: "SET_AGENT_MODE"; mode: AgentMode }
   | { type: "APPEND_TERMINAL_LOG"; entry: TerminalLogEntry }
   | { type: "TOGGLE_TERMINAL" }
   | { type: "CLEAR_TERMINAL_LOGS" }
@@ -128,6 +142,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, activeTickerError: action.error };
     case "SET_SELECTED_SYMBOL":
       return { ...state, selectedSymbol: action.symbol };
+    case "SET_VIEW_MODE":
+      return { ...state, viewMode: action.viewMode };
     case "ADD_CHAT_MESSAGE":
       return { ...state, chatMessages: [...state.chatMessages, action.message] };
     case "APPEND_TO_LAST_MESSAGE": {
@@ -222,14 +238,29 @@ function reducer(state: AppState, action: Action): AppState {
       msgs[msgs.length - 1] = { ...last, sources: action.sources };
       return { ...state, chatMessages: msgs };
     }
-    case "SET_TICKER_REPORT":
-      return { ...state, tickerReport: action.report };
-    case "APPEND_TICKER_REPORT":
-      return { ...state, tickerReport: state.tickerReport + action.content };
-    case "SET_TICKER_REPORT_LOADING":
-      return { ...state, tickerReportLoading: action.loading };
-    case "SET_TICKER_REPORT_ERROR":
-      return { ...state, tickerReportError: action.error != null ? String(action.error) : null };
+    case "SET_TICKER_ANALYSIS_LOADING":
+      return { ...state, tickerAnalysis: { ...state.tickerAnalysis, loading: action.loading } };
+    case "SET_TICKER_ANALYSIS_SECTION": {
+      const prev = state.tickerAnalysis;
+      return {
+        ...state,
+        tickerAnalysis: {
+          ...prev,
+          sections: {
+            ...prev.sections,
+            [action.section]: { content: action.content, rating: action.rating, source: action.source, loading: false },
+          },
+        },
+      };
+    }
+    case "SET_TICKER_ANALYSIS_OVERALL":
+      return { ...state, tickerAnalysis: { ...state.tickerAnalysis, overallRating: action.rating } };
+    case "SET_TICKER_ANALYSIS_ERROR":
+      return { ...state, tickerAnalysis: { ...state.tickerAnalysis, error: action.error, loading: false } };
+    case "CLEAR_TICKER_ANALYSIS":
+      return { ...state, tickerAnalysis: { ..._EMPTY_ANALYSIS } };
+    case "SET_AGENT_MODE":
+      return { ...state, agentMode: action.mode };
     case "APPEND_TERMINAL_LOG": {
       const logs = [...state.terminalLogs, action.entry];
       return { ...state, terminalLogs: logs.length > 500 ? logs.slice(logs.length - 500) : logs };
@@ -252,7 +283,8 @@ function reducer(state: AppState, action: Action): AppState {
 interface AppContextValue {
   state: AppState;
   selectTicker: (symbol: string) => void;
-  sendMessage: (text: string, contextRefs: string[]) => void;
+  navigateToDashboard: () => void;
+  sendMessage: (text: string, contextRefs: string[], agentMode?: AgentMode) => void;
   reloadPortfolio: () => void;
   reloadWatchlist: () => void;
   toggleWatchlist: (ticker: string) => Promise<void>;
@@ -260,6 +292,7 @@ interface AppContextValue {
   toggleTerminal: () => void;
   clearTerminalLogs: () => void;
   setDebugMode: (enabled: boolean) => void;
+  setAgentMode: (mode: AgentMode) => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -379,13 +412,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     reportAbortRef.current?.abort();
 
     const sym = symbol.toUpperCase();
+    dispatch({ type: "SET_VIEW_MODE", viewMode: "ticker" });
     dispatch({ type: "SET_SELECTED_SYMBOL", symbol: sym });
     dispatch({ type: "SET_ACTIVE_TICKER", ticker: null });
     dispatch({ type: "SET_ACTIVE_TICKER_LOADING", loading: true });
     dispatch({ type: "SET_ACTIVE_TICKER_ERROR", error: null });
-    dispatch({ type: "SET_TICKER_REPORT", report: "" });
-    dispatch({ type: "SET_TICKER_REPORT_LOADING", loading: true });
-    dispatch({ type: "SET_TICKER_REPORT_ERROR", error: null });
+    dispatch({ type: "CLEAR_TICKER_ANALYSIS" });
+    dispatch({ type: "SET_TICKER_ANALYSIS_LOADING", loading: true });
 
     const tickerAbort = new AbortController();
     tickerAbortRef.current = tickerAbort;
@@ -396,39 +429,71 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "SET_ACTIVE_TICKER", ticker });
         dispatch({ type: "SET_ACTIVE_TICKER_LOADING", loading: false });
 
-        // Kick off report stream
+        // Kick off analysis stream
         const reportAbort = new AbortController();
         reportAbortRef.current = reportAbort;
 
-        streamChat(
-          `Give me a concise 3-4 sentence fundamental analysis of ${sym}.`,
-          crypto.randomUUID(),
-          [sym],
-          (token) => {
-            if (!reportAbort.signal.aborted)
-              dispatch({ type: "APPEND_TICKER_REPORT", content: token });
+        // Set loading skeletons for each section
+        for (const section of ["fundamentals", "sentiment", "technical"] as const) {
+          dispatch({
+            type: "SET_TICKER_ANALYSIS_SECTION",
+            section,
+            content: "",
+            rating: "",
+            source: "",
+          });
+          // Mark them as loading by re-setting the section with loading state
+        }
+        // Override loading flag on each section
+        dispatch({ type: "SET_TICKER_ANALYSIS_LOADING", loading: true });
+
+        streamAnalysis(
+          sym,
+          (section, content, rating, source) => {
+            if (!reportAbort.signal.aborted) {
+              dispatch({
+                type: "SET_TICKER_ANALYSIS_SECTION",
+                section,
+                content,
+                rating,
+                source,
+              });
+            }
           },
-          () => dispatch({ type: "SET_TICKER_REPORT_LOADING", loading: false }),
-          (errMsg) => {
-            dispatch({ type: "SET_TICKER_REPORT_LOADING", loading: false });
-            dispatch({ type: "SET_TICKER_REPORT_ERROR", error: errMsg || "Analysis failed" });
+          (rating) => {
+            if (!reportAbort.signal.aborted) {
+              dispatch({ type: "SET_TICKER_ANALYSIS_OVERALL", rating });
+            }
           },
-          reportAbort.signal,
-          undefined,  // onToolEvent
-          undefined,  // onSources
-          () => {     // onKgUpdate — RC4 fix: ensure graph explorer refreshes
+          () => {
+            dispatch({ type: "SET_TICKER_ANALYSIS_LOADING", loading: false });
             dispatch({ type: "KG_UPDATED", ticker: sym });
           },
-          undefined,  // onProgressEvent — ticker report is inline; steps not shown here
+          (errMsg) => {
+            dispatch({ type: "SET_TICKER_ANALYSIS_ERROR", error: errMsg || "Analysis failed" });
+          },
+          reportAbort.signal,
         );
       })
       .catch((err) => {
         if (tickerAbort.signal.aborted) return;
         dispatch({ type: "SET_ACTIVE_TICKER_LOADING", loading: false });
         dispatch({ type: "SET_ACTIVE_TICKER_ERROR", error: String(err) });
-        dispatch({ type: "SET_TICKER_REPORT_LOADING", loading: false });
-        dispatch({ type: "SET_TICKER_REPORT_ERROR", error: "Failed to load analysis" });
+        dispatch({ type: "SET_TICKER_ANALYSIS_ERROR", error: "Failed to load analysis" });
       });
+  }, []);
+
+  const navigateToDashboard = useCallback(() => {
+    tickerAbortRef.current?.abort();
+    reportAbortRef.current?.abort();
+    dispatch({ type: "SET_ACTIVE_TICKER", ticker: null });
+    dispatch({ type: "SET_SELECTED_SYMBOL", symbol: null });
+    dispatch({ type: "SET_ACTIVE_TICKER_LOADING", loading: false });
+    dispatch({ type: "SET_ACTIVE_TICKER_ERROR", error: null });
+    dispatch({ type: "CLEAR_TICKER_ANALYSIS" });
+    dispatch({ type: "SET_TICKER_ANALYSIS_ERROR", error: null });
+    dispatch({ type: "SET_TICKER_ANALYSIS_LOADING", loading: false });
+    dispatch({ type: "SET_VIEW_MODE", viewMode: "dashboard" });
   }, []);
 
   const addSystemMessage = useCallback(async (content: string) => {
@@ -471,7 +536,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_DEBUG_MODE", enabled });
   }, []);
 
-  const sendMessage = useCallback((text: string, contextRefs: string[]) => {
+  const setAgentMode = useCallback((mode: AgentMode) => {
+    dispatch({ type: "SET_AGENT_MODE", mode });
+  }, []);
+
+  const sendMessage = useCallback((text: string, contextRefs: string[], agentMode?: AgentMode) => {
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -603,11 +672,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           detail,
         );
       },
+      agentMode ?? state.agentMode,
     );
-  }, [termLog, state.debugMode]);
+  }, [termLog, state.debugMode, state.agentMode]);
 
   return (
-    <AppContext.Provider value={{ state, selectTicker, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage, toggleTerminal, clearTerminalLogs, setDebugMode }}>
+    <AppContext.Provider value={{ state, selectTicker, navigateToDashboard, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage, toggleTerminal, clearTerminalLogs, setDebugMode, setAgentMode }}>
       {children}
     </AppContext.Provider>
   );

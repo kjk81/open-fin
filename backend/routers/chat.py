@@ -59,13 +59,25 @@ def _validate_context_refs(v: list[str]) -> list[str]:
     return v
 
 
+_VALID_AGENT_MODES: frozenset[str] = frozenset({"genie", "fundamentals", "sentiment", "technical"})
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4096)
     session_id: str = Field(..., min_length=1, max_length=64)
     context_refs: list[str] = Field(default_factory=list)
+    agent_mode: str = Field(default="genie")
 
     _check_session_id = field_validator("session_id")(_validate_session_id)
     _check_context_refs = field_validator("context_refs")(_validate_context_refs)
+
+    @field_validator("agent_mode")
+    @classmethod
+    def _check_agent_mode(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in _VALID_AGENT_MODES:
+            raise ValueError(f"agent_mode must be one of {sorted(_VALID_AGENT_MODES)}")
+        return v
 
 
 class SystemEventRequest(BaseModel):
@@ -108,6 +120,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "active_skills": [],
         "tool_call_count": 0,
         "tool_results": [],
+        "agent_mode": request.agent_mode,
     }
 
     # Accumulators filled during streaming
@@ -172,197 +185,208 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "verbose": True,
         })
 
-        event_iter = graph.astream_events(initial_state, version="v2").__aiter__()
-        while True:
-            try:
-                event = await asyncio.wait_for(
-                    event_iter.__anext__(), timeout=GRAPH_STREAM_TIMEOUT
-                )
-            except StopAsyncIteration:
-                break
+        from agent.ollama_queue import ollama_chat_slot
 
-            evt: str = event.get("event", "")
-            name: str = event.get("name", "")
-            data: dict = event.get("data", {})
+        _chat_slot_cm = ollama_chat_slot()
+        await _chat_slot_cm.__aenter__()
 
-            if evt == "on_chain_start":
-                stage_message = describe_graph_stage(name, "start")
-                if stage_message:
-                    residual = extract_visible_content(flush=True)
-                    if residual:
-                        yield emit({"type": "token", "content": residual})
+        try:
+            event_iter = graph.astream_events(initial_state, version="v2").__aiter__()
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        event_iter.__anext__(), timeout=GRAPH_STREAM_TIMEOUT
+                    )
+                except StopAsyncIteration:
+                    break
+
+                evt: str = event.get("event", "")
+                name: str = event.get("name", "")
+                data: dict = event.get("data", {})
+
+                if evt == "on_chain_start":
+                    stage_message = describe_graph_stage(name, "start")
+                    if stage_message:
+                        residual = extract_visible_content(flush=True)
+                        if residual:
+                            yield emit({"type": "token", "content": residual})
                         
-                    step_id = f"stage-{name}-{event_seq + 1}"
-                    stage_step_ids[name] = step_id
-                    yield emit({
-                        "type": "status",
-                        "step_id": step_id,
-                        "state": "running",
-                        "phase": name,
-                        "message": stage_message,
-                        "verbose": True,
-                    })
+                        step_id = f"stage-{name}-{event_seq + 1}"
+                        stage_step_ids[name] = step_id
+                        yield emit({
+                            "type": "status",
+                            "step_id": step_id,
+                            "state": "running",
+                            "phase": name,
+                            "message": stage_message,
+                            "verbose": True,
+                        })
 
-            elif evt == "on_chain_end":
-                # Fallback: capture tool_results from any node's on_chain_end
-                # output in case on_tool_end event parsing failed or tools were
-                # executed programmatically (e.g. fallback_tool_execution).
-                # Previously only checked execute_tool_calls (RC6); now generic.
-                chain_output = data.get("output") or {}
-                if isinstance(chain_output, dict):
-                    fallback_results = chain_output.get("tool_results") or []
-                    if fallback_results:
-                        existing_keys = {
-                            (r["tool"], r.get("result", "")[:100])
-                            for r in accumulated_tool_results
-                        }
-                        for fr in fallback_results:
-                            if not isinstance(fr, dict) or not fr.get("tool"):
-                                continue
-                            fkey = (fr["tool"], fr.get("result", "")[:100])
-                            if fkey not in existing_keys:
-                                accumulated_tool_results.append(fr)
-                                logger.debug(
-                                    "Fallback: captured tool_result for %s from %s on_chain_end",
-                                    fr["tool"], name,
-                                )
+                elif evt == "on_chain_end":
+                    # Fallback: capture tool_results from any node's on_chain_end
+                    # output in case on_tool_end event parsing failed or tools were
+                    # executed programmatically (e.g. fallback_tool_execution).
+                    # Previously only checked execute_tool_calls (RC6); now generic.
+                    chain_output = data.get("output") or {}
+                    if isinstance(chain_output, dict):
+                        fallback_results = chain_output.get("tool_results") or []
+                        if fallback_results:
+                            existing_keys = {
+                                (r["tool"], r.get("result", "")[:100])
+                                for r in accumulated_tool_results
+                            }
+                            for fr in fallback_results:
+                                if not isinstance(fr, dict) or not fr.get("tool"):
+                                    continue
+                                fkey = (fr["tool"], fr.get("result", "")[:100])
+                                if fkey not in existing_keys:
+                                    accumulated_tool_results.append(fr)
+                                    logger.debug(
+                                        "Fallback: captured tool_result for %s from %s on_chain_end",
+                                        fr["tool"], name,
+                                    )
 
-                stage_message = describe_graph_stage(name, "end")
-                if stage_message:
+                    stage_message = describe_graph_stage(name, "end")
+                    if stage_message:
+                        residual = extract_visible_content(flush=True)
+                        if residual:
+                            yield emit({"type": "token", "content": residual})
+
+                        step_id = stage_step_ids.pop(name, f"stage-{name}-{event_seq + 1}")
+                        yield emit({
+                            "type": "status",
+                            "step_id": step_id,
+                            "state": "done",
+                            "phase": name,
+                            "message": stage_message,
+                            "verbose": True,
+                        })
+
+                elif evt == "on_tool_start":
                     residual = extract_visible_content(flush=True)
                     if residual:
                         yield emit({"type": "token", "content": residual})
 
-                    step_id = stage_step_ids.pop(name, f"stage-{name}-{event_seq + 1}")
+                    tool_start_times[name] = time.monotonic()
+                    raw_input = data.get("input") or {}
+                    tool_args_cache[name] = raw_input
+                    # Keep args summary concise for the frontend chip
+                    args_preview = {k: v for k, v in list(raw_input.items())[:3]}
+                    step_id = f"tool-{name}-{event_seq + 1}"
+                    tool_step_ids[name].append(step_id)
+
                     yield emit({
-                        "type": "status",
+                        "type": "step",
                         "step_id": step_id,
-                        "state": "done",
-                        "phase": name,
-                        "message": stage_message,
-                        "verbose": True,
+                        "category": "tool",
+                        "tool": name,
+                        "state": "running",
+                        "message": f"Using {tool_human_label(name)}",
                     })
+                    yield emit({"type": "tool_start", "tool": name, "args": args_preview})
 
-            elif evt == "on_tool_start":
-                residual = extract_visible_content(flush=True)
-                if residual:
-                    yield emit({"type": "token", "content": residual})
+                elif evt == "on_tool_end":
+                    residual = extract_visible_content(flush=True)
+                    if residual:
+                        yield emit({"type": "token", "content": residual})
 
-                tool_start_times[name] = time.monotonic()
-                raw_input = data.get("input") or {}
-                tool_args_cache[name] = raw_input
-                # Keep args summary concise for the frontend chip
-                args_preview = {k: v for k, v in list(raw_input.items())[:3]}
-                step_id = f"tool-{name}-{event_seq + 1}"
-                tool_step_ids[name].append(step_id)
+                    started = tool_start_times.pop(name, time.monotonic())
+                    duration_ms = int((time.monotonic() - started) * 1000)
+                    success = True
+                    step_id = (
+                        tool_step_ids[name].pop(0)
+                        if tool_step_ids.get(name)
+                        else f"tool-{name}-{event_seq + 1}"
+                    )
 
-                yield emit({
-                    "type": "step",
-                    "step_id": step_id,
-                    "category": "tool",
-                    "tool": name,
-                    "state": "running",
-                    "message": f"Using {tool_human_label(name)}",
-                })
-                yield emit({"type": "tool_start", "tool": name, "args": args_preview})
+                    # --- Robust output extraction (RC1 fix) ---
+                    # LangGraph may emit output as str, ToolMessage, or other types
+                    raw_output = data.get("output")
+                    output_str: str = ""
+                    if isinstance(raw_output, str):
+                        output_str = raw_output
+                    elif isinstance(raw_output, ToolMessage):
+                        content = raw_output.content
+                        output_str = content if isinstance(content, str) else json.dumps(content) if content else ""
+                    elif hasattr(raw_output, "content"):
+                        # Duck-type for any message-like object
+                        content = raw_output.content
+                        output_str = content if isinstance(content, str) else json.dumps(content) if content else ""
+                    elif raw_output is not None:
+                        output_str = str(raw_output)
 
-            elif evt == "on_tool_end":
-                residual = extract_visible_content(flush=True)
-                if residual:
-                    yield emit({"type": "token", "content": residual})
+                    if output_str:
+                        try:
+                            parsed = json.loads(output_str)
+                            # Normalize list-shaped output to dict wrapper
+                            if isinstance(parsed, list):
+                                parsed = {"data": parsed, "success": True}
+                            # Guard against non-dict parsed values (RC2 fix)
+                            if isinstance(parsed, dict):
+                                success = bool(parsed.get("success", True))
+                            else:
+                                parsed = {"data": parsed, "success": True}
+                            # Use cached args from on_tool_start (RC3 fix)
+                            tool_args = tool_args_cache.pop(name, None) or data.get("input") or {}
+                            # Collect for KG post-processing
+                            accumulated_tool_results.append({
+                                "tool": name,
+                                "args": tool_args,
+                                "result": json.dumps(parsed),
+                            })
+                            # Collect citations — deduplicated by URL
+                            if isinstance(parsed, dict):
+                                for src in parsed.get("sources") or []:
+                                    url = src.get("url") or ""
+                                    if url and not any(s["url"] == url for s in accumulated_sources):
+                                        accumulated_sources.append({"url": url, "title": src.get("title") or url})
+                        except Exception as exc:
+                            # RC2 fix: catch ALL exceptions, not just JSONDecodeError
+                            logger.debug("on_tool_end parse error for %s: %s", name, exc)
 
-                started = tool_start_times.pop(name, time.monotonic())
-                duration_ms = int((time.monotonic() - started) * 1000)
-                success = True
-                step_id = (
-                    tool_step_ids[name].pop(0)
-                    if tool_step_ids.get(name)
-                    else f"tool-{name}-{event_seq + 1}"
-                )
+                    yield emit({
+                        "type": "step",
+                        "step_id": step_id,
+                        "category": "tool",
+                        "tool": name,
+                        "state": "done" if success else "error",
+                        "duration_ms": duration_ms,
+                        "message": (
+                            f"Searched {tool_human_label(name)}"
+                            if success
+                            else f"Failed using {tool_human_label(name)}"
+                        ),
+                    })
+                    yield emit({"type": "tool_end", "tool": name, "duration_ms": duration_ms, "success": success})
 
-                # --- Robust output extraction (RC1 fix) ---
-                # LangGraph may emit output as str, ToolMessage, or other types
-                raw_output = data.get("output")
-                output_str: str = ""
-                if isinstance(raw_output, str):
-                    output_str = raw_output
-                elif isinstance(raw_output, ToolMessage):
-                    content = raw_output.content
-                    output_str = content if isinstance(content, str) else json.dumps(content) if content else ""
-                elif hasattr(raw_output, "content"):
-                    # Duck-type for any message-like object
-                    content = raw_output.content
-                    output_str = content if isinstance(content, str) else json.dumps(content) if content else ""
-                elif raw_output is not None:
-                    output_str = str(raw_output)
+                elif evt == "on_chat_model_stream":
+                    chunk = data.get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        content = chunk.content
+                        # LangChain AIMessageChunk.content can be a list of dicts
+                        # (structured content blocks) for some providers. Normalize
+                        # to a plain string before forwarding to the frontend.
+                        if isinstance(content, list):
+                            content = "".join(
+                                item.get("text", "") if isinstance(item, dict) else str(item)
+                                for item in content
+                            )
+                        elif not isinstance(content, str):
+                            content = str(content)
+                        if content:
+                            think_buffer += content
+                            visible = extract_visible_content()
+                            if visible:
+                                yield emit({"type": "token", "content": visible})
 
-                if output_str:
-                    try:
-                        parsed = json.loads(output_str)
-                        # Normalize list-shaped output to dict wrapper
-                        if isinstance(parsed, list):
-                            parsed = {"data": parsed, "success": True}
-                        # Guard against non-dict parsed values (RC2 fix)
-                        if isinstance(parsed, dict):
-                            success = bool(parsed.get("success", True))
-                        else:
-                            parsed = {"data": parsed, "success": True}
-                        # Use cached args from on_tool_start (RC3 fix)
-                        tool_args = tool_args_cache.pop(name, None) or data.get("input") or {}
-                        # Collect for KG post-processing
-                        accumulated_tool_results.append({
-                            "tool": name,
-                            "args": tool_args,
-                            "result": json.dumps(parsed),
-                        })
-                        # Collect citations — deduplicated by URL
-                        if isinstance(parsed, dict):
-                            for src in parsed.get("sources") or []:
-                                url = src.get("url") or ""
-                                if url and not any(s["url"] == url for s in accumulated_sources):
-                                    accumulated_sources.append({"url": url, "title": src.get("title") or url})
-                    except Exception as exc:
-                        # RC2 fix: catch ALL exceptions, not just JSONDecodeError
-                        logger.debug("on_tool_end parse error for %s: %s", name, exc)
+            residual = extract_visible_content(flush=True)
+            if residual:
+                yield emit({"type": "token", "content": residual})
 
-                yield emit({
-                    "type": "step",
-                    "step_id": step_id,
-                    "category": "tool",
-                    "tool": name,
-                    "state": "done" if success else "error",
-                    "duration_ms": duration_ms,
-                    "message": (
-                        f"Searched {tool_human_label(name)}"
-                        if success
-                        else f"Failed using {tool_human_label(name)}"
-                    ),
-                })
-                yield emit({"type": "tool_end", "tool": name, "duration_ms": duration_ms, "success": success})
-
-            elif evt == "on_chat_model_stream":
-                chunk = data.get("chunk")
-                if chunk and hasattr(chunk, "content") and chunk.content:
-                    content = chunk.content
-                    # LangChain AIMessageChunk.content can be a list of dicts
-                    # (structured content blocks) for some providers. Normalize
-                    # to a plain string before forwarding to the frontend.
-                    if isinstance(content, list):
-                        content = "".join(
-                            item.get("text", "") if isinstance(item, dict) else str(item)
-                            for item in content
-                        )
-                    elif not isinstance(content, str):
-                        content = str(content)
-                    if content:
-                        think_buffer += content
-                        visible = extract_visible_content()
-                        if visible:
-                            yield emit({"type": "token", "content": visible})
-
-        residual = extract_visible_content(flush=True)
-        if residual:
-            yield emit({"type": "token", "content": residual})
+        # Release the Ollama chat slot so analysis requests can proceed
+        # while KG post-processing runs (it doesn't need the LLM).
+        finally:
+            await _chat_slot_cm.__aexit__(None, None, None)
 
         # ── Post-graph side-effects ────────────────────────────────────────
         yield emit({

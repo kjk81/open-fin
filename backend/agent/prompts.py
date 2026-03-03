@@ -119,45 +119,72 @@ def _join(*blocks: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_router_soul_prompt() -> str:
+def get_router_soul_prompt(agent_mode: str = "genie") -> str:
     """Return the SOUL-infused system prompt for the route_finance_query node.
 
     Injects the current date, enforces strict tool-use discipline, and embeds
     the Finneas personality from SOUL.md.  Called fresh on every invocation
     so the date is always accurate.
+
+    When *agent_mode* is not ``"genie"``, a MODE FOCUS directive is injected
+    listing the preferred tools for that mode.
     """
-    return _join(
+    from .mode_config import get_mode_config
+
+    blocks: list[str] = [
         _FINNEAS_IDENTITY,
         _date_line(),
         _ENTITY_RECOGNITION,
         _TOOL_ENFORCEMENT,
         _SINGLE_CALL_POLICY,
         _SKILLS_BLOCK,
-        (
-            "When you have gathered sufficient data, respond with your "
-            "analysis WITHOUT making further tool calls.  The response should "
-            "be a brief signal to indicate readiness — the final user-facing "
-            "answer will be synthesised in a later step."
-        ),
+    ]
+
+    cfg = get_mode_config(agent_mode)
+    if cfg.name != "genie" and cfg.preferred_tools:
+        tool_list = ", ".join(cfg.preferred_tools)
+        blocks.append(
+            f"MODE FOCUS — {cfg.name.upper()}:\n"
+            f"Prioritise these tools: {tool_list}.\n"
+            "You may call other tools only if the preferred set is insufficient "
+            "to answer the query.  Stay focused on the mode's domain."
+        )
+
+    blocks.append(
+        "When you have gathered sufficient data, respond with your "
+        "analysis WITHOUT making further tool calls.  The response should "
+        "be a brief signal to indicate readiness — the final user-facing "
+        "answer will be synthesised in a later step."
     )
 
+    return _join(*blocks)
 
-def get_finalize_prompt() -> str:
+
+def get_finalize_prompt(agent_mode: str = "genie") -> str:
     """Return the SOUL-infused system prompt for the finalize_response node.
 
     Used by the cheaper synthesis LLM that converts accumulated tool data
-    into a streamed user-facing answer.
+    into a streamed user-facing answer.  When *agent_mode* is set, the
+    mode-specific output format instructions are appended.
     """
+    from .mode_config import get_mode_config
+
+    base_instruction = (
+        "Synthesise the research data below into a clear, data-driven "
+        "answer for the user.  Be concise, precise and professional.  "
+        "Cite specific numbers from the tool results.  Structure your "
+        "response with clear headings where appropriate.  Always clarify "
+        "that your responses are informational and not financial advice."
+    )
+
+    cfg = get_mode_config(agent_mode)
+    if cfg.finalize_format:
+        base_instruction += "\n\n" + cfg.finalize_format
+
     return _join(
         _FINNEAS_IDENTITY,
         _date_line(),
-        (
-            "Synthesise the research data below into a clear, data-driven "
-            "answer for the user.  Be concise, precise and professional.  "
-            "Cite specific numbers from the tool results.  Structure your "
-            "response with clear headings where appropriate.  Always clarify "
-            "that your responses are informational and not financial advice."
-        ),
+        base_instruction,
     )
 
 

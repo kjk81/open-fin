@@ -102,7 +102,7 @@ class TestGetOhlcv:
             result = await get_ohlcv("BADTICKER")
 
         assert result.success is False
-        assert "No OHLCV" in (result.error or "")
+        assert "All free-tier providers failed" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ class TestGetCompanyProfile:
         assert result.success is True
         assert result.data.name == "Apple Inc."
         assert result.data.ceo is None  # yfinance doesn't provide CEO
-        assert "Degraded" in (result.error or "")
+        assert result.error is None
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +217,7 @@ class TestScreenStocks:
             result = await screen_stocks(criteria={"sector": "Technology"})
 
         assert result.success is False
-        assert "FMP" in (result.error or "")
+        assert "stock_screener" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------

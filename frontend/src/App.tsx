@@ -6,6 +6,7 @@ import { StatusBadge } from "./components/StatusBadge";
 import { Spinner } from "./components/Spinner";
 import { PortfolioSidebar } from "./components/PortfolioSidebar";
 import { ChatBox } from "./components/ChatBox";
+import { Dashboard } from "./components/Dashboard";
 import { TickerDashboard } from "./components/TickerDashboard";
 import { KnowledgeGraphExplorer } from "./components/kg/KnowledgeGraphExplorer";
 import { WorkerStatusBadge } from "./components/WorkerStatusBadge";
@@ -140,7 +141,7 @@ function Layout() {
             <ChatBox />
           </ErrorBoundary>
           <ErrorBoundary label="Ticker Dashboard">
-            <TickerDashboard />
+            {state.viewMode === "dashboard" ? <Dashboard /> : <TickerDashboard />}
           </ErrorBoundary>
           {state.terminalOpen && (
             <div style={{ gridColumn: "1 / -1" }}>

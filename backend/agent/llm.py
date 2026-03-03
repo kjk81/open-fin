@@ -396,22 +396,33 @@ class FallbackLLM:
         fallback_order: list[str],
         role: str | None = None,
         subagent_order: list[str] | None = None,
+        purpose: str = "chat",
     ) -> None:
         self.mode = (mode or "cloud").lower().strip()
         self.role = role
+        self._purpose = purpose
         self.fallback_order = _effective_order_for_role(
             self.mode, fallback_order, role=role, subagent_order=subagent_order
         )
 
+    def _is_ollama(self, provider: str) -> bool:
+        return provider.lower().strip() == "ollama"
+
     async def ainvoke(self, messages: list[BaseMessage]):
+        from .ollama_queue import ollama_chat_slot, ollama_analysis_slot
+
         last_error: Exception | None = None
         for provider in self.fallback_order:
             model = _provider_model(provider, role=self.role)
             if model is None:
                 continue
             try:
-                logger.info("LLM invoke provider=%s role=%s", provider, self.role)
-                return await model.ainvoke(messages)
+                logger.info("LLM invoke provider=%s role=%s purpose=%s", provider, self.role, self._purpose)
+                if self._is_ollama(provider) and self._purpose == "analysis":
+                    async with ollama_analysis_slot():
+                        return await model.ainvoke(messages)
+                else:
+                    return await model.ainvoke(messages)
             except Exception as exc:
                 last_error = exc
                 logger.warning("LLM invoke failed provider=%s role=%s error=%s", provider, self.role, exc)
@@ -424,6 +435,8 @@ class FallbackLLM:
 
     async def ainvoke_structured(self, messages: list[BaseMessage], schema: type):
         """Invoke the first healthy provider with structured output enabled."""
+        from .ollama_queue import ollama_chat_slot, ollama_analysis_slot
+
         last_error: Exception | None = None
         for provider in self.fallback_order:
             model = _provider_model(provider, role=self.role)
@@ -435,7 +448,11 @@ class FallbackLLM:
                     provider, self.role, getattr(schema, "__name__", str(schema)),
                 )
                 structured_model = model.with_structured_output(schema)
-                return await structured_model.ainvoke(messages)
+                if self._is_ollama(provider) and self._purpose == "analysis":
+                    async with ollama_analysis_slot():
+                        return await structured_model.ainvoke(messages)
+                else:
+                    return await structured_model.ainvoke(messages)
             except Exception as exc:
                 last_error = exc
                 logger.warning("LLM structured invoke failed provider=%s role=%s error=%s", provider, self.role, exc)
@@ -446,6 +463,8 @@ class FallbackLLM:
         ) from last_error
 
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
+        from .ollama_queue import ollama_analysis_slot
+
         last_error: Exception | None = None
         for provider in self.fallback_order:
             model = _provider_model(provider, role=self.role)
@@ -454,10 +473,16 @@ class FallbackLLM:
 
             emitted_any = False
             try:
-                logger.info("LLM stream provider=%s role=%s", provider, self.role)
-                async for chunk in model.astream(messages):
-                    emitted_any = True
-                    yield chunk
+                logger.info("LLM stream provider=%s role=%s purpose=%s", provider, self.role, self._purpose)
+                if self._is_ollama(provider) and self._purpose == "analysis":
+                    async with ollama_analysis_slot():
+                        async for chunk in model.astream(messages):
+                            emitted_any = True
+                            yield chunk
+                else:
+                    async for chunk in model.astream(messages):
+                        emitted_any = True
+                        yield chunk
                 return
             except Exception as exc:
                 last_error = exc
@@ -474,13 +499,15 @@ class FallbackLLM:
         ) from last_error
 
 
-def get_llm(role: str | None = None) -> FallbackLLM:
+def get_llm(role: str | None = None, purpose: str = "chat") -> FallbackLLM:
     """Return a :class:`FallbackLLM` configured for *role*.
 
     Args:
         role: ``"agent"`` (prose synthesis, cheap/fast model) or
               ``"subagent"`` (tool calling, high-reasoning model).
               ``None`` preserves the original behaviour — global settings only.
+        purpose: ``"chat"`` (default) or ``"analysis"`` — controls Ollama
+                 queue slot selection.
     """
     mode, fallback_order, subagent_order = load_llm_settings()
     return FallbackLLM(
@@ -488,4 +515,5 @@ def get_llm(role: str | None = None) -> FallbackLLM:
         fallback_order=fallback_order,
         role=role,
         subagent_order=subagent_order,
+        purpose=purpose,
     )

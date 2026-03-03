@@ -1,36 +1,12 @@
-"""Financial data tools: dual-source strategy (yfinance + FMP).
-
-Market Action tools  (yfinance)
---------------------------------
-- ``get_ohlcv``              OHLCV bars for charting; any period/interval
-- ``get_technical_snapshot`` SMA(20/50/200), RSI(14), ATR(14), volume avg
-- ``validate_ticker``        Quick existence check
-- ``detect_anomalies``       Price-drop / volume-spike / gap-down scanner
-
-Fundamental Research tools  (FMP primary, yfinance fallback)
--------------------------------------------------------------
-- ``get_company_profile``       Name, sector, market cap, description, CEO
-- ``get_financial_statements``  Income statement (revenue, EPS, margins)
-- ``get_balance_sheet``         Assets, debt, cash, book value
-- ``get_institutional_holders`` Top institutional ownership
-- ``get_peers``                 Peer ticker list
-- ``screen_stocks``             Fundamental screener (FMP only; no yfinance fallback)
-
-Data-source discipline
-----------------------
-yfinance and FMP are **never** mixed inside a single function without explicit
-fallback logic.  When FMP is unavailable the ``ToolResult.error`` field signals
-degraded mode even when ``success=True`` (partial yfinance data returned).
-``success=False`` is reserved for cases where no data at all could be obtained.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timezone
+import os
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from clients.http_base import HttpClient
 from schemas.finance import (
     AnomalySignal,
     BalanceSheetSummary,
@@ -43,13 +19,10 @@ from schemas.finance import (
     TechnicalSnapshot,
 )
 from schemas.tool_contracts import SourceRef, ToolResult, ToolTiming
+from tools.finance_fallback import FallbackChainExhaustedError, ProviderName, run_fallback_chain
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _now_utc() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
@@ -59,30 +32,39 @@ def _timing(tool_name: str, started_at: datetime) -> ToolTiming:
     return ToolTiming(tool_name=tool_name, started_at=started_at, ended_at=_now_utc())
 
 
-def _yf_source(symbol: str) -> SourceRef:
-    return SourceRef(
-        url=f"https://finance.yahoo.com/quote/{symbol}",  # type: ignore[arg-type]
-        title=f"Yahoo Finance: {symbol}",
-        fetched_at=_now_utc(),
-    )
+def _provider_source(provider: ProviderName, symbol: str) -> SourceRef:
+    symbol = symbol.upper()
+    if provider == "yfinance":
+        url = f"https://finance.yahoo.com/quote/{symbol}"
+        title = f"Yahoo Finance: {symbol}"
+    elif provider == "fmp":
+        url = f"https://financialmodelingprep.com/financial-statements/{symbol}"
+        title = f"FMP: {symbol}"
+    elif provider == "eodhd":
+        url = f"https://eodhistoricaldata.com"
+        title = f"EODHD: {symbol}"
+    elif provider == "twelve_data":
+        url = "https://twelvedata.com"
+        title = f"Twelve Data: {symbol}"
+    elif provider == "finnhub":
+        url = "https://finnhub.io"
+        title = f"Finnhub: {symbol}"
+    elif provider == "alpha_vantage":
+        url = "https://www.alphavantage.co"
+        title = f"Alpha Vantage: {symbol}"
+    else:
+        url = "https://www.tiingo.com"
+        title = f"Tiingo: {symbol}"
 
-
-def _fmp_source(symbol: str) -> SourceRef:
-    return SourceRef(
-        url=f"https://financialmodelingprep.com/financial-statements/{symbol}",  # type: ignore[arg-type]
-        title=f"FMP: {symbol}",
-        fetched_at=_now_utc(),
-    )
+    return SourceRef(url=url, title=title, fetched_at=_now_utc())
 
 
 async def _run_sync(fn, *args):
-    """Run a blocking function in the default thread-pool executor."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, fn, *args)
 
 
 async def _yf_info(symbol: str) -> dict:
-    """Fetch yfinance Ticker.info dict; returns {} on any error."""
     import yfinance as yf
 
     def _fetch():
@@ -95,8 +77,43 @@ async def _yf_info(symbol: str) -> dict:
         return {}
 
 
+def _period_to_days(period: str) -> int:
+    mapping = {
+        "1d": 1,
+        "5d": 5,
+        "1mo": 30,
+        "3mo": 90,
+        "6mo": 180,
+        "1y": 365,
+        "2y": 730,
+        "5y": 1825,
+        "10y": 3650,
+        "ytd": 365,
+        "max": 3650,
+    }
+    return mapping.get(period, 90)
+
+
+def _eodhd_symbol(symbol: str) -> str:
+    s = symbol.upper()
+    return s if "." in s else f"{s}.US"
+
+
+async def _get_json(
+    base_url: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 15.0,
+    max_retries: int = 1,
+) -> Any:
+    async with HttpClient(base_url=base_url, timeout=timeout, max_retries=max_retries, headers=headers) as http:
+        response = await http.get(path, params=params)
+    return response.json()
+
+
 def _compute_technicals(df) -> dict[str, float | None]:
-    """Compute SMA/RSI/ATR/volume indicators from a yfinance history DataFrame."""
     import pandas as pd
 
     if df is None or df.empty:
@@ -115,7 +132,6 @@ def _compute_technicals(df) -> dict[str, float | None]:
     result["sma_50"] = _sma(50)
     result["sma_200"] = _sma(200)
 
-    # RSI(14) via Wilder's smoothing approximation
     if len(closes) >= 16:
         delta = closes.diff()
         gain = delta.clip(lower=0).rolling(14).mean()
@@ -130,14 +146,12 @@ def _compute_technicals(df) -> dict[str, float | None]:
     else:
         result["rsi_14"] = None
 
-    # Volume avg(20d)
     if "Volume" in df.columns and len(df) >= 20:
         val = df["Volume"].rolling(20).mean().iloc[-1]
         result["volume_avg_20d"] = round(float(val), 0) if not pd.isna(val) else None
     else:
         result["volume_avg_20d"] = None
 
-    # ATR(14)
     if len(df) >= 15 and {"High", "Low"}.issubset(df.columns):
         high_low = df["High"] - df["Low"]
         high_prev = (df["High"] - df["Close"].shift()).abs()
@@ -148,13 +162,11 @@ def _compute_technicals(df) -> dict[str, float | None]:
     else:
         result["atr_14"] = None
 
-    # 1-day % change
     if len(closes) >= 2:
         result["pct_change_1d"] = round(float((closes.iloc[-1] / closes.iloc[-2] - 1) * 100), 4)
     else:
         result["pct_change_1d"] = None
 
-    # 5-day % change
     if len(closes) >= 6:
         result["pct_change_5d"] = round(float((closes.iloc[-1] / closes.iloc[-6] - 1) * 100), 4)
     else:
@@ -163,66 +175,829 @@ def _compute_technicals(df) -> dict[str, float | None]:
     return result
 
 
-# ---------------------------------------------------------------------------
-# yfinance Tools — Market Action
-# ---------------------------------------------------------------------------
+async def _ohlcv_from_yfinance(symbol: str, period: str, interval: str) -> list[OHLCVBar]:
+    import yfinance as yf
 
-async def get_ohlcv(
-    symbol: str,
-    period: str = "3mo",
-    interval: str = "1d",
-) -> ToolResult[list[OHLCVBar]]:
-    """Fetch OHLCV candlestick bars for charting.
+    def _fetch():
+        return yf.Ticker(symbol.upper()).history(period=period, interval=interval)
 
-    Parameters
-    ----------
-    symbol:
-        Ticker symbol (e.g. ``"AAPL"``).
-    period:
-        History window — any yfinance period string (``1d``, ``5d``, ``1mo``,
-        ``3mo``, ``6mo``, ``1y``, ``2y``, ``5y``, ``10y``, ``ytd``, ``max``).
-    interval:
-        Bar granularity — any yfinance interval string (``1m``, ``2m``, ``5m``,
-        ``15m``, ``30m``, ``60m``, ``90m``, ``1h``, ``1d``, ``5d``, ``1wk``,
-        ``1mo``, ``3mo``).
-    """
+    df = await _run_sync(_fetch)
+    if df is None or df.empty:
+        raise ValueError("No yfinance OHLCV data")
+
+    bars: list[OHLCVBar] = []
+    for ts, row in df.iterrows():
+        bars.append(OHLCVBar(
+            date=ts.date() if hasattr(ts, "date") else ts,
+            open=round(float(row["Open"]), 4),
+            high=round(float(row["High"]), 4),
+            low=round(float(row["Low"]), 4),
+            close=round(float(row["Close"]), 4),
+            volume=int(row.get("Volume", 0) or 0),
+        ))
+    return bars
+
+
+async def _ohlcv_from_eodhd(symbol: str, period: str) -> list[OHLCVBar]:
+    token = os.environ.get("EODHD_API_TOKEN", "").strip()
+    if not token:
+        raise ValueError("EODHD_API_TOKEN missing")
+
+    end_date = date.today()
+    start_date = end_date - timedelta(days=_period_to_days(period))
+    data = await _get_json(
+        "https://eodhistoricaldata.com",
+        f"/api/eod/{_eodhd_symbol(symbol)}",
+        params={
+            "api_token": token,
+            "fmt": "json",
+            "from": start_date.isoformat(),
+            "to": end_date.isoformat(),
+            "period": "d",
+        },
+    )
+
+    rows = data if isinstance(data, list) else []
+    if not rows:
+        raise ValueError("No EODHD OHLCV data")
+
+    return [
+        OHLCVBar(
+            date=date.fromisoformat(row["date"]),
+            open=float(row.get("open", 0.0)),
+            high=float(row.get("high", 0.0)),
+            low=float(row.get("low", 0.0)),
+            close=float(row.get("close", 0.0)),
+            volume=int(row.get("volume", 0) or 0),
+        )
+        for row in rows
+        if row.get("date")
+    ]
+
+
+async def _ohlcv_from_fmp(symbol: str, period: str) -> list[OHLCVBar]:
+    from clients.fmp import FmpClient
+
+    days = min(_period_to_days(period), 3650)
+    async with FmpClient() as fmp:
+        data = await fmp.get(f"/historical-price-full/{symbol.upper()}", params={"timeseries": days})
+
+    hist = (data or {}).get("historical", []) if isinstance(data, dict) else []
+    if not hist:
+        raise ValueError("No FMP OHLCV data")
+
+    bars: list[OHLCVBar] = []
+    for row in hist:
+        if not row.get("date"):
+            continue
+        bars.append(OHLCVBar(
+            date=date.fromisoformat(row["date"]),
+            open=float(row.get("open", 0.0)),
+            high=float(row.get("high", 0.0)),
+            low=float(row.get("low", 0.0)),
+            close=float(row.get("close", 0.0)),
+            volume=int(row.get("volume", 0) or 0),
+        ))
+
+    if not bars:
+        raise ValueError("No FMP OHLCV bars")
+    return bars
+
+
+async def _ohlcv_from_alpha_vantage(symbol: str, period: str) -> list[OHLCVBar]:
+    api_key = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("ALPHA_VANTAGE_API_KEY missing")
+
+    data = await _get_json(
+        "https://www.alphavantage.co",
+        "/query",
+        params={
+            "function": "TIME_SERIES_DAILY_ADJUSTED",
+            "symbol": symbol.upper(),
+            "outputsize": "full",
+            "apikey": api_key,
+        },
+    )
+
+    series = data.get("Time Series (Daily)", {}) if isinstance(data, dict) else {}
+    if not series:
+        raise ValueError("No Alpha Vantage OHLCV data")
+
+    limit = _period_to_days(period)
+    bars: list[OHLCVBar] = []
+    for dt, row in list(series.items())[:limit]:
+        bars.append(OHLCVBar(
+            date=date.fromisoformat(dt),
+            open=float(row.get("1. open", 0.0)),
+            high=float(row.get("2. high", 0.0)),
+            low=float(row.get("3. low", 0.0)),
+            close=float(row.get("4. close", 0.0)),
+            volume=int(float(row.get("6. volume", 0.0))),
+        ))
+
+    if not bars:
+        raise ValueError("No Alpha Vantage OHLCV bars")
+    return bars
+
+
+async def _ohlcv_from_tiingo(symbol: str, period: str) -> list[OHLCVBar]:
+    token = os.environ.get("TIINGO_API_KEY", "").strip()
+    if not token:
+        raise ValueError("TIINGO_API_KEY missing")
+
+    end_date = date.today()
+    start_date = end_date - timedelta(days=_period_to_days(period))
+    data = await _get_json(
+        "https://api.tiingo.com",
+        f"/tiingo/daily/{symbol.upper()}/prices",
+        params={
+            "token": token,
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+            "resampleFreq": "daily",
+        },
+    )
+
+    rows = data if isinstance(data, list) else []
+    if not rows:
+        raise ValueError("No Tiingo OHLCV data")
+
+    bars: list[OHLCVBar] = []
+    for row in rows:
+        dt_raw = row.get("date", "")
+        if not dt_raw:
+            continue
+        bars.append(OHLCVBar(
+            date=date.fromisoformat(dt_raw[:10]),
+            open=float(row.get("open", 0.0)),
+            high=float(row.get("high", 0.0)),
+            low=float(row.get("low", 0.0)),
+            close=float(row.get("close", 0.0)),
+            volume=int(row.get("volume", 0) or 0),
+        ))
+
+    if not bars:
+        raise ValueError("No Tiingo OHLCV bars")
+    return bars
+
+
+async def _ohlcv_from_twelve_data(symbol: str, interval: str) -> list[OHLCVBar]:
+    api_key = os.environ.get("TWELVE_DATA_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("TWELVE_DATA_API_KEY missing")
+
+    data = await _get_json(
+        "https://api.twelvedata.com",
+        "/time_series",
+        params={
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "apikey": api_key,
+            "outputsize": 200,
+            "format": "JSON",
+        },
+    )
+
+    rows = data.get("values", []) if isinstance(data, dict) else []
+    if not rows:
+        raise ValueError("No Twelve Data OHLCV data")
+
+    bars: list[OHLCVBar] = []
+    for row in rows:
+        dt_raw = row.get("datetime", "")
+        if not dt_raw:
+            continue
+        bars.append(OHLCVBar(
+            date=date.fromisoformat(dt_raw[:10]),
+            open=float(row.get("open", 0.0)),
+            high=float(row.get("high", 0.0)),
+            low=float(row.get("low", 0.0)),
+            close=float(row.get("close", 0.0)),
+            volume=int(float(row.get("volume", 0.0))),
+        ))
+
+    if not bars:
+        raise ValueError("No Twelve Data OHLCV bars")
+    return bars
+
+
+async def _ohlcv_from_finnhub(symbol: str, period: str) -> list[OHLCVBar]:
+    api_key = os.environ.get("FINNHUB_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("FINNHUB_API_KEY missing")
+
+    now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+    start_ts = int((datetime.now(tz=timezone.utc) - timedelta(days=_period_to_days(period))).timestamp())
+    data = await _get_json(
+        "https://finnhub.io/api/v1",
+        "/stock/candle",
+        params={
+            "symbol": symbol.upper(),
+            "resolution": "D",
+            "from": start_ts,
+            "to": now_ts,
+            "token": api_key,
+        },
+    )
+
+    status = data.get("s") if isinstance(data, dict) else None
+    if status != "ok":
+        raise ValueError("No Finnhub OHLCV data")
+
+    opens = data.get("o", [])
+    highs = data.get("h", [])
+    lows = data.get("l", [])
+    closes = data.get("c", [])
+    volumes = data.get("v", [])
+    times = data.get("t", [])
+
+    bars: list[OHLCVBar] = []
+    for idx, ts in enumerate(times):
+        bars.append(OHLCVBar(
+            date=datetime.fromtimestamp(ts, tz=timezone.utc).date(),
+            open=float(opens[idx]),
+            high=float(highs[idx]),
+            low=float(lows[idx]),
+            close=float(closes[idx]),
+            volume=int(volumes[idx]),
+        ))
+
+    if not bars:
+        raise ValueError("No Finnhub OHLCV bars")
+    return bars
+
+
+def _profile_from_fmp_item(symbol: str, item: dict[str, Any]) -> FMPCompanyProfile:
+    ipo_date = None
+    if item.get("ipoDate"):
+        try:
+            ipo_date = date.fromisoformat(item["ipoDate"])
+        except ValueError:
+            ipo_date = None
+
+    return FMPCompanyProfile(
+        symbol=symbol.upper(),
+        name=item.get("companyName"),
+        sector=item.get("sector"),
+        industry=item.get("industry"),
+        market_cap=item.get("mktCap"),
+        description=item.get("description"),
+        ceo=item.get("ceo"),
+        ipo_date=ipo_date,
+        exchange=item.get("exchangeShortName"),
+    )
+
+
+async def _profile_fmp(symbol: str) -> FMPCompanyProfile:
+    from clients.fmp import FmpClient
+
+    async with FmpClient() as fmp:
+        data = await fmp.get(f"/profile?symbol={symbol.upper()}")
+
+    items = data if isinstance(data, list) else [data]
+    if not items:
+        raise ValueError("Empty FMP profile response")
+    return _profile_from_fmp_item(symbol, items[0])
+
+
+async def _profile_yfinance(symbol: str) -> FMPCompanyProfile:
+    info = await _yf_info(symbol)
+    if not info:
+        raise ValueError("Empty yfinance profile")
+    return FMPCompanyProfile(
+        symbol=symbol.upper(),
+        name=info.get("longName") or info.get("shortName"),
+        sector=info.get("sector"),
+        industry=info.get("industry"),
+        market_cap=info.get("marketCap"),
+        description=info.get("longBusinessSummary"),
+        ceo=info.get("companyOfficers", [{}])[0].get("name") if info.get("companyOfficers") else None,
+        exchange=info.get("exchange"),
+    )
+
+
+async def _profile_eodhd(symbol: str) -> FMPCompanyProfile:
+    token = os.environ.get("EODHD_API_TOKEN", "").strip()
+    if not token:
+        raise ValueError("EODHD_API_TOKEN missing")
+
+    data = await _get_json(
+        "https://eodhistoricaldata.com",
+        f"/api/fundamentals/{_eodhd_symbol(symbol)}",
+        params={"api_token": token, "fmt": "json"},
+    )
+
+    general = data.get("General", {}) if isinstance(data, dict) else {}
+    if not general:
+        raise ValueError("No EODHD profile data")
+
+    ipo_date = None
+    if general.get("IPODate"):
+        try:
+            ipo_date = date.fromisoformat(general["IPODate"])
+        except ValueError:
+            ipo_date = None
+
+    return FMPCompanyProfile(
+        symbol=symbol.upper(),
+        name=general.get("Name"),
+        sector=general.get("Sector"),
+        industry=general.get("Industry"),
+        market_cap=general.get("MarketCapitalization"),
+        description=general.get("Description"),
+        ceo=general.get("CEO"),
+        ipo_date=ipo_date,
+        exchange=general.get("Exchange"),
+    )
+
+
+async def _profile_alpha(symbol: str) -> FMPCompanyProfile:
+    api_key = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("ALPHA_VANTAGE_API_KEY missing")
+
+    data = await _get_json(
+        "https://www.alphavantage.co",
+        "/query",
+        params={"function": "OVERVIEW", "symbol": symbol.upper(), "apikey": api_key},
+    )
+
+    if not isinstance(data, dict) or not data.get("Symbol"):
+        raise ValueError("No Alpha Vantage profile")
+
+    ipo_date = None
+    if data.get("IPODate"):
+        try:
+            ipo_date = date.fromisoformat(data["IPODate"])
+        except ValueError:
+            ipo_date = None
+
+    market_cap = None
+    if data.get("MarketCapitalization"):
+        try:
+            market_cap = float(data["MarketCapitalization"])
+        except ValueError:
+            market_cap = None
+
+    return FMPCompanyProfile(
+        symbol=symbol.upper(),
+        name=data.get("Name"),
+        sector=data.get("Sector"),
+        industry=data.get("Industry"),
+        market_cap=market_cap,
+        description=data.get("Description"),
+        exchange=data.get("Exchange"),
+        ipo_date=ipo_date,
+    )
+
+
+async def _profile_finnhub(symbol: str) -> FMPCompanyProfile:
+    api_key = os.environ.get("FINNHUB_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("FINNHUB_API_KEY missing")
+
+    data = await _get_json(
+        "https://finnhub.io/api/v1",
+        "/stock/profile2",
+        params={"symbol": symbol.upper(), "token": api_key},
+    )
+    if not isinstance(data, dict) or not data.get("ticker"):
+        raise ValueError("No Finnhub profile")
+
+    return FMPCompanyProfile(
+        symbol=symbol.upper(),
+        name=data.get("name"),
+        industry=data.get("finnhubIndustry"),
+        market_cap=data.get("marketCapitalization"),
+        exchange=data.get("exchange"),
+    )
+
+
+async def _profile_tiingo(symbol: str) -> FMPCompanyProfile:
+    token = os.environ.get("TIINGO_API_KEY", "").strip()
+    if not token:
+        raise ValueError("TIINGO_API_KEY missing")
+
+    data = await _get_json(
+        "https://api.tiingo.com",
+        f"/tiingo/daily/{symbol.upper()}",
+        params={"token": token},
+    )
+    if not isinstance(data, dict) or not data.get("ticker"):
+        raise ValueError("No Tiingo profile")
+
+    return FMPCompanyProfile(
+        symbol=symbol.upper(),
+        name=data.get("name"),
+        exchange=data.get("exchangeCode"),
+        description=data.get("description"),
+    )
+
+
+def _income_from_table(symbol: str, table: list[dict[str, Any]], limit: int) -> list[IncomeStatementSummary]:
+    rows: list[IncomeStatementSummary] = []
+    for item in table[:limit]:
+        rev = item.get("revenue")
+        gross = item.get("grossProfit")
+        op_income = item.get("operatingIncome")
+        rows.append(IncomeStatementSummary(
+            symbol=symbol.upper(),
+            period=str(item.get("date", "")),
+            revenue=rev,
+            net_income=item.get("netIncome"),
+            eps=item.get("eps"),
+            gross_margin=(gross / rev) if rev and gross else None,
+            operating_margin=(op_income / rev) if rev and op_income else None,
+        ))
+    return rows
+
+
+async def _income_fmp(symbol: str, period: str, limit: int) -> list[IncomeStatementSummary]:
+    from clients.fmp import FmpClient
+
+    async with FmpClient() as fmp:
+        data = await fmp.get(
+            f"/income-statement?symbol={symbol.upper()}",
+            params={"period": period, "limit": limit},
+        )
+
+    rows = data if isinstance(data, list) else []
+    return _income_from_table(symbol, rows, limit)
+
+
+async def _income_yfinance(symbol: str, limit: int) -> list[IncomeStatementSummary]:
+    import pandas as pd
+    import yfinance as yf
+
+    def _fetch():
+        return yf.Ticker(symbol.upper()).financials
+
+    fin = await _run_sync(_fetch)
+    output: list[IncomeStatementSummary] = []
+    if fin is None or fin.empty:
+        return output
+
+    for col in list(fin.columns)[:limit]:
+        def _safe(row: str):
+            if row in fin.index:
+                val = fin.loc[row, col]
+                return float(val) if val is not None and not pd.isna(val) else None
+            return None
+
+        rev = _safe("Total Revenue")
+        gross = _safe("Gross Profit")
+        output.append(IncomeStatementSummary(
+            symbol=symbol.upper(),
+            period=str(col.date()) if hasattr(col, "date") else str(col),
+            revenue=rev,
+            net_income=_safe("Net Income"),
+            gross_margin=(gross / rev) if rev and gross and rev != 0 else None,
+        ))
+
+    if not output:
+        raise ValueError("No yfinance income statements")
+    return output
+
+
+async def _income_eodhd(symbol: str, period: str, limit: int) -> list[IncomeStatementSummary]:
+    token = os.environ.get("EODHD_API_TOKEN", "").strip()
+    if not token:
+        raise ValueError("EODHD_API_TOKEN missing")
+
+    data = await _get_json(
+        "https://eodhistoricaldata.com",
+        f"/api/fundamentals/{_eodhd_symbol(symbol)}",
+        params={"api_token": token, "fmt": "json"},
+    )
+
+    section = "yearly" if period == "annual" else "quarterly"
+    income = ((data or {}).get("Financials", {}).get("Income_Statement", {}).get(section, {}))
+    if not isinstance(income, dict) or not income:
+        raise ValueError("No EODHD income statements")
+
+    rows: list[IncomeStatementSummary] = []
+    for dt, row in list(income.items())[:limit]:
+        rev = row.get("totalRevenue")
+        gross = row.get("grossProfit")
+        op_income = row.get("operatingIncome")
+        rows.append(IncomeStatementSummary(
+            symbol=symbol.upper(),
+            period=dt,
+            revenue=rev,
+            net_income=row.get("netIncome"),
+            eps=row.get("eps"),
+            gross_margin=(gross / rev) if rev and gross else None,
+            operating_margin=(op_income / rev) if rev and op_income else None,
+        ))
+
+    if not rows:
+        raise ValueError("No EODHD income rows")
+    return rows
+
+
+async def _income_alpha(symbol: str, period: str, limit: int) -> list[IncomeStatementSummary]:
+    api_key = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("ALPHA_VANTAGE_API_KEY missing")
+
+    data = await _get_json(
+        "https://www.alphavantage.co",
+        "/query",
+        params={"function": "INCOME_STATEMENT", "symbol": symbol.upper(), "apikey": api_key},
+    )
+
+    key = "annualReports" if period == "annual" else "quarterlyReports"
+    reports = data.get(key, []) if isinstance(data, dict) else []
+    if not reports:
+        raise ValueError("No Alpha Vantage income statements")
+
+    rows: list[IncomeStatementSummary] = []
+    for row in reports[:limit]:
+        rev = float(row["totalRevenue"]) if row.get("totalRevenue") not in (None, "None") else None
+        gross = float(row["grossProfit"]) if row.get("grossProfit") not in (None, "None") else None
+        op_income = float(row["operatingIncome"]) if row.get("operatingIncome") not in (None, "None") else None
+        eps = float(row["reportedEPS"]) if row.get("reportedEPS") not in (None, "None") else None
+        rows.append(IncomeStatementSummary(
+            symbol=symbol.upper(),
+            period=row.get("fiscalDateEnding", ""),
+            revenue=rev,
+            net_income=float(row["netIncome"]) if row.get("netIncome") not in (None, "None") else None,
+            eps=eps,
+            gross_margin=(gross / rev) if rev and gross else None,
+            operating_margin=(op_income / rev) if rev and op_income else None,
+        ))
+
+    return rows
+
+
+async def _balance_fmp(symbol: str, period: str, limit: int) -> list[BalanceSheetSummary]:
+    from clients.fmp import FmpClient
+
+    async with FmpClient() as fmp:
+        data = await fmp.get(
+            f"/balance-sheet-statement?symbol={symbol.upper()}",
+            params={"period": period, "limit": limit},
+        )
+
+    rows = data if isinstance(data, list) else []
+    out: list[BalanceSheetSummary] = []
+    for item in rows[:limit]:
+        out.append(BalanceSheetSummary(
+            symbol=symbol.upper(),
+            period=item.get("date", ""),
+            total_assets=item.get("totalAssets"),
+            total_debt=item.get("totalDebt"),
+            cash=item.get("cashAndCashEquivalents"),
+            book_value_per_share=item.get("bookValuePerShare"),
+        ))
+    return out
+
+
+async def _balance_yfinance(symbol: str, limit: int) -> list[BalanceSheetSummary]:
+    import pandas as pd
+    import yfinance as yf
+
+    def _fetch():
+        return yf.Ticker(symbol.upper()).balance_sheet
+
+    bs = await _run_sync(_fetch)
+    if bs is None or bs.empty:
+        raise ValueError("No yfinance balance sheet")
+
+    out: list[BalanceSheetSummary] = []
+    for col in list(bs.columns)[:limit]:
+        def _safe(row: str):
+            if row in bs.index:
+                val = bs.loc[row, col]
+                return float(val) if val is not None and not pd.isna(val) else None
+            return None
+
+        out.append(BalanceSheetSummary(
+            symbol=symbol.upper(),
+            period=str(col.date()) if hasattr(col, "date") else str(col),
+            total_assets=_safe("Total Assets"),
+            total_debt=_safe("Total Debt") or _safe("Long Term Debt"),
+            cash=_safe("Cash And Cash Equivalents") or _safe("Cash"),
+        ))
+    return out
+
+
+async def _balance_eodhd(symbol: str, period: str, limit: int) -> list[BalanceSheetSummary]:
+    token = os.environ.get("EODHD_API_TOKEN", "").strip()
+    if not token:
+        raise ValueError("EODHD_API_TOKEN missing")
+
+    data = await _get_json(
+        "https://eodhistoricaldata.com",
+        f"/api/fundamentals/{_eodhd_symbol(symbol)}",
+        params={"api_token": token, "fmt": "json"},
+    )
+
+    section = "yearly" if period == "annual" else "quarterly"
+    balance = ((data or {}).get("Financials", {}).get("Balance_Sheet", {}).get(section, {}))
+    if not isinstance(balance, dict) or not balance:
+        raise ValueError("No EODHD balance sheet")
+
+    out: list[BalanceSheetSummary] = []
+    for dt, row in list(balance.items())[:limit]:
+        out.append(BalanceSheetSummary(
+            symbol=symbol.upper(),
+            period=dt,
+            total_assets=row.get("totalAssets"),
+            total_debt=row.get("totalDebt"),
+            cash=row.get("cashAndShortTermInvestments") or row.get("cashAndCashEquivalents"),
+            book_value_per_share=row.get("bookValue"),
+        ))
+    return out
+
+
+async def _balance_alpha(symbol: str, period: str, limit: int) -> list[BalanceSheetSummary]:
+    api_key = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("ALPHA_VANTAGE_API_KEY missing")
+
+    data = await _get_json(
+        "https://www.alphavantage.co",
+        "/query",
+        params={"function": "BALANCE_SHEET", "symbol": symbol.upper(), "apikey": api_key},
+    )
+
+    key = "annualReports" if period == "annual" else "quarterlyReports"
+    reports = data.get(key, []) if isinstance(data, dict) else []
+    if not reports:
+        raise ValueError("No Alpha Vantage balance sheets")
+
+    rows: list[BalanceSheetSummary] = []
+    for row in reports[:limit]:
+        rows.append(BalanceSheetSummary(
+            symbol=symbol.upper(),
+            period=row.get("fiscalDateEnding", ""),
+            total_assets=float(row["totalAssets"]) if row.get("totalAssets") not in (None, "None") else None,
+            total_debt=float(row["totalLiabilities"]) if row.get("totalLiabilities") not in (None, "None") else None,
+            cash=float(row["cashAndCashEquivalentsAtCarryingValue"]) if row.get("cashAndCashEquivalentsAtCarryingValue") not in (None, "None") else None,
+            book_value_per_share=float(row["commonStockSharesOutstanding"]) if row.get("commonStockSharesOutstanding") not in (None, "None") else None,
+        ))
+
+    return rows
+
+
+async def _holders_fmp(symbol: str) -> list[InstitutionalHolder]:
+    from clients.fmp import FmpClient
+
+    async with FmpClient() as fmp:
+        data = await fmp.get(f"/institutional-holder/{symbol.upper()}")
+
+    rows = data if isinstance(data, list) else []
+    holders: list[InstitutionalHolder] = []
+    for item in rows:
+        holders.append(InstitutionalHolder(
+            holder_name=item.get("holder", ""),
+            shares=item.get("shares"),
+            pct_ownership=item.get("weightedPercent") or item.get("percentage"),
+            change_pct=item.get("change"),
+        ))
+    if not holders:
+        raise ValueError("No FMP institutional holders")
+    return holders
+
+
+async def _holders_yfinance(symbol: str) -> list[InstitutionalHolder]:
+    import yfinance as yf
+
+    def _fetch():
+        return yf.Ticker(symbol.upper()).institutional_holders
+
+    df = await _run_sync(_fetch)
+    if df is None or df.empty:
+        raise ValueError("No yfinance institutional holders")
+
+    holders: list[InstitutionalHolder] = []
+    for _, row in df.iterrows():
+        shares_val = row.get("Shares")
+        pct_val = row.get("% Out")
+        holders.append(InstitutionalHolder(
+            holder_name=str(row.get("Holder", "")),
+            shares=int(shares_val) if shares_val is not None else None,
+            pct_ownership=float(pct_val) if pct_val is not None else None,
+        ))
+    return holders
+
+
+async def _peers_fmp(symbol: str) -> PeerComparison:
+    from clients.fmp import FmpClient
+
+    async with FmpClient() as fmp:
+        data = await fmp.get("/stock-peers", params={"symbol": symbol.upper()})
+
+    items = data if isinstance(data, list) else [data]
+    peers_list: list[str] = []
+    if items:
+        peers_list = [p for p in (items[0].get("peersList") or []) if p and p.upper() != symbol.upper()]
+
+    if not peers_list:
+        raise ValueError("No FMP peers list")
+
+    profile = await _profile_fmp(symbol)
+    return PeerComparison(symbol=symbol.upper(), peers=peers_list, sector=profile.sector, industry=profile.industry)
+
+
+async def _peers_finnhub(symbol: str) -> PeerComparison:
+    api_key = os.environ.get("FINNHUB_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("FINNHUB_API_KEY missing")
+
+    data = await _get_json(
+        "https://finnhub.io/api/v1",
+        "/stock/peers",
+        params={"symbol": symbol.upper(), "token": api_key},
+    )
+
+    peers = [p for p in (data or []) if isinstance(p, str) and p.upper() != symbol.upper()]
+    if not peers:
+        raise ValueError("No Finnhub peers")
+
+    return PeerComparison(symbol=symbol.upper(), peers=peers)
+
+
+async def _screener_fmp(criteria: dict[str, Any], limit: int) -> list[ScreeningHit]:
+    from clients.fmp import FmpClient
+
+    allowlist = {
+        "marketCapMoreThan", "marketCapLowerThan",
+        "priceMoreThan", "priceLowerThan",
+        "betaMoreThan", "betaLowerThan",
+        "volumeMoreThan", "volumeLowerThan",
+        "dividendMoreThan", "dividendLowerThan",
+        "isEtf", "isActivelyTrading",
+        "sector", "industry", "country", "exchange",
+        "peRatioMoreThan", "peRatioLowerThan",
+    }
+
+    params: dict[str, Any] = {k: v for k, v in criteria.items() if k in allowlist}
+    params["limit"] = limit
+
+    async with FmpClient() as fmp:
+        data = await fmp.get("/stock-screener", params=params)
+
+    rows = data if isinstance(data, list) else []
+    hits: list[ScreeningHit] = []
+    for item in rows:
+        hits.append(ScreeningHit(
+            symbol=item.get("symbol", ""),
+            name=item.get("companyName"),
+            pe_ratio=item.get("pe"),
+            price_to_book=item.get("priceBookValueRatio"),
+            market_cap=item.get("marketCap"),
+            sector=item.get("sector"),
+        ))
+    if not hits:
+        raise ValueError("No screener hits")
+    return hits
+
+
+def _is_historical_interval(interval: str) -> bool:
+    return interval in {"1d", "5d", "1wk", "1mo", "3mo"}
+
+
+async def get_ohlcv(symbol: str, period: str = "3mo", interval: str = "1d") -> ToolResult[list[OHLCVBar]]:
     started_at = _now_utc()
     tool_name = "get_ohlcv"
 
+    category = "historical" if _is_historical_interval(interval) else "price"
+    endpoint_id = "ohlcv_bars"
+
+    handlers = {
+        "yfinance": lambda: _ohlcv_from_yfinance(symbol, period, interval),
+        "eodhd": lambda: _ohlcv_from_eodhd(symbol, period),
+        "fmp": lambda: _ohlcv_from_fmp(symbol, period),
+        "alpha_vantage": lambda: _ohlcv_from_alpha_vantage(symbol, period),
+        "tiingo": lambda: _ohlcv_from_tiingo(symbol, period),
+        "twelve_data": lambda: _ohlcv_from_twelve_data(symbol, interval),
+        "finnhub": lambda: _ohlcv_from_finnhub(symbol, period),
+    }
+
     try:
-        import yfinance as yf
-
-        def _fetch():
-            return yf.Ticker(symbol.upper()).history(period=period, interval=interval)
-
-        df = await _run_sync(_fetch)
-
-        if df is None or df.empty:
-            return ToolResult(
-                data=[],
-                timing=_timing(tool_name, started_at),
-                success=False,
-                error=f"No OHLCV data returned for {symbol!r} (period={period}, interval={interval})",
-            )
-
-        bars: list[OHLCVBar] = []
-        for ts, row in df.iterrows():
-            bars.append(OHLCVBar(
-                date=ts.date() if hasattr(ts, "date") else ts,
-                open=round(float(row["Open"]), 4),
-                high=round(float(row["High"]), 4),
-                low=round(float(row["Low"]), 4),
-                close=round(float(row["Close"]), 4),
-                volume=int(row.get("Volume", 0) or 0),
-            ))
-
+        result = await run_fallback_chain(
+            category=category,
+            endpoint_id=endpoint_id,
+            handlers=handlers,
+            per_provider_timeout=18.0,
+        )
+        bars: list[OHLCVBar] = sorted(result.payload, key=lambda b: b.date)
         return ToolResult(
             data=bars,
-            sources=[_yf_source(symbol)],
+            sources=[_provider_source(result.provider, symbol)],
             timing=_timing(tool_name, started_at),
             success=True,
         )
-
+    except FallbackChainExhaustedError as exc:
+        return ToolResult(
+            data=[],
+            timing=_timing(tool_name, started_at),
+            success=False,
+            error=str(exc),
+        )
     except Exception as exc:
         logger.warning("get_ohlcv(%s): %s", symbol, exc)
         return ToolResult(
@@ -234,67 +1009,50 @@ async def get_ohlcv(
 
 
 async def get_technical_snapshot(symbol: str) -> ToolResult[TechnicalSnapshot]:
-    """Compute SMA(20/50/200), RSI(14), ATR(14), and volume average from 1-year history.
-
-    Returns a ``TechnicalSnapshot`` for cross-referencing screening results or
-    providing entry-setup context after fundamental analysis.
-    """
     started_at = _now_utc()
     tool_name = "get_technical_snapshot"
 
-    try:
-        import yfinance as yf
-
-        def _fetch():
-            return yf.Ticker(symbol.upper()).history(period="1y")
-
-        df = await _run_sync(_fetch)
-        technicals = _compute_technicals(df)
-
-        price = 0.0
-        if df is not None and not df.empty:
-            price = round(float(df["Close"].iloc[-1]), 4)
-
-        snapshot = TechnicalSnapshot(
-            symbol=symbol.upper(),
-            price=price,
-            **technicals,
-        )
-
-        return ToolResult(
-            data=snapshot,
-            sources=[_yf_source(symbol)],
-            timing=_timing(tool_name, started_at),
-            success=True,
-        )
-
-    except Exception as exc:
-        logger.warning("get_technical_snapshot(%s): %s", symbol, exc)
+    ohlcv_result = await get_ohlcv(symbol, period="1y", interval="1d")
+    if not ohlcv_result.success or not ohlcv_result.data:
         return ToolResult(
             data=TechnicalSnapshot(symbol=symbol.upper(), price=0.0),
             timing=_timing(tool_name, started_at),
             success=False,
-            error=str(exc),
+            error=ohlcv_result.error or "Unable to compute technicals from any free-tier provider.",
         )
+
+    import pandas as pd
+
+    df = pd.DataFrame([
+        {
+            "Open": bar.open,
+            "High": bar.high,
+            "Low": bar.low,
+            "Close": bar.close,
+            "Volume": bar.volume,
+        }
+        for bar in ohlcv_result.data
+    ])
+
+    technicals = _compute_technicals(df)
+    price = round(float(ohlcv_result.data[-1].close), 4)
+
+    snapshot = TechnicalSnapshot(symbol=symbol.upper(), price=price, **technicals)
+    return ToolResult(
+        data=snapshot,
+        sources=ohlcv_result.sources,
+        timing=_timing(tool_name, started_at),
+        success=True,
+    )
 
 
 async def validate_ticker(symbol: str) -> bool:
-    """Return ``True`` if the symbol resolves to a real security via yfinance.
-
-    Uses the same heuristic as ``routers/ticker.py``:
-    ``quoteType`` present OR (has identity fields AND has a price).
-    """
     info = await _yf_info(symbol)
     if not info:
         return False
     quote_type = info.get("quoteType")
-    has_identity = bool(
-        info.get("symbol") or info.get("longName") or info.get("shortName")
-    )
-    has_price = (
-        info.get("currentPrice") is not None
-        or info.get("regularMarketPrice") is not None
-    )
+    has_identity = bool(info.get("symbol") or info.get("longName") or info.get("shortName"))
+    has_price = info.get("currentPrice") is not None or info.get("regularMarketPrice") is not None
     return bool(quote_type) or (has_identity and has_price)
 
 
@@ -304,49 +1062,29 @@ async def detect_anomalies(
     volume_spike_multiplier: float = 2.0,
     gap_down_threshold: float = 0.03,
 ) -> list[AnomalySignal]:
-    """Scan a list of symbols for intraday technical anomalies.
-
-    Parameters
-    ----------
-    symbols:
-        Ticker symbols to monitor.
-    price_drop_threshold:
-        Fraction single-day decline to trigger a ``price_drop`` signal
-        (default ``0.05`` = 5 %).
-    volume_spike_multiplier:
-        Ratio of today's volume to the 20-day average that triggers a
-        ``volume_spike`` signal (default ``2.0`` = 2×).
-    gap_down_threshold:
-        Fraction overnight gap-down (open vs. prior close) to trigger a
-        ``gap_down`` signal (default ``0.03`` = 3 %).
-    """
-    import yfinance as yf
-
     signals: list[AnomalySignal] = []
     now = _now_utc()
 
     for symbol in symbols:
         try:
-            def _fetch(sym: str = symbol):
-                return yf.Ticker(sym.upper()).history(period="25d")
-
-            df = await _run_sync(_fetch)
-            if df is None or len(df) < 2:
+            ohlcv = await get_ohlcv(symbol, period="1mo", interval="1d")
+            bars = ohlcv.data if ohlcv.success else []
+            if len(bars) < 2:
                 continue
 
-            closes = df["Close"]
-            volumes = df["Volume"]
-            opens = df["Open"]
+            latest = bars[-1]
+            prev = bars[-2]
+            closes = [b.close for b in bars]
+            volumes = [b.volume for b in bars]
 
-            latest_close = float(closes.iloc[-1])
-            prev_close = float(closes.iloc[-2])
-            latest_open = float(opens.iloc[-1])
-            latest_volume = float(volumes.iloc[-1])
+            latest_close = float(latest.close)
+            prev_close = float(prev.close)
+            latest_open = float(latest.open)
+            latest_volume = float(latest.volume)
 
-            window = min(20, len(volumes) - 1)
-            vol_avg_20 = float(volumes.iloc[:-1].rolling(window).mean().iloc[-1])
+            vol_window = min(20, len(volumes) - 1)
+            vol_avg_20 = sum(volumes[-(vol_window + 1):-1]) / max(vol_window, 1)
 
-            # --- Price drop ---
             day_return = (latest_close - prev_close) / prev_close
             if day_return <= -price_drop_threshold:
                 signals.append(AnomalySignal(
@@ -360,7 +1098,6 @@ async def detect_anomalies(
                     ),
                 ))
 
-            # --- Gap down ---
             gap = (latest_open - prev_close) / prev_close
             if gap <= -gap_down_threshold:
                 signals.append(AnomalySignal(
@@ -374,7 +1111,6 @@ async def detect_anomalies(
                     ),
                 ))
 
-            # --- Volume spike ---
             if vol_avg_20 > 0:
                 vol_ratio = latest_volume / vol_avg_20
                 if vol_ratio >= volume_spike_multiplier:
@@ -395,75 +1131,39 @@ async def detect_anomalies(
     return signals
 
 
-# ---------------------------------------------------------------------------
-# FMP Tools — Fundamental Research  (yfinance fallback on FMPUnavailableError)
-# ---------------------------------------------------------------------------
-
 async def get_company_profile(symbol: str) -> ToolResult[FMPCompanyProfile]:
-    """Fetch company profile from FMP.
-
-    Fallback: yfinance ``Ticker.info`` — CEO and IPO date will be ``None``.
-    """
     started_at = _now_utc()
     tool_name = "get_company_profile"
 
-    from clients.fmp import FmpClient, FMPUnavailableError
+    handlers = {
+        "fmp": lambda: _profile_fmp(symbol),
+        "yfinance": lambda: _profile_yfinance(symbol),
+        "eodhd": lambda: _profile_eodhd(symbol),
+        "alpha_vantage": lambda: _profile_alpha(symbol),
+        "finnhub": lambda: _profile_finnhub(symbol),
+        "tiingo": lambda: _profile_tiingo(symbol),
+    }
 
     try:
-        async with FmpClient() as fmp:
-            data = await fmp.get(f"/profile?symbol={symbol.upper()}")
-
-        items = data if isinstance(data, list) else [data]
-        if not items:
-            raise ValueError("Empty FMP profile response")
-
-        item = items[0]
-        ipo_date = None
-        if item.get("ipoDate"):
-            try:
-                ipo_date = date.fromisoformat(item["ipoDate"])
-            except ValueError:
-                pass
-
-        profile = FMPCompanyProfile(
-            symbol=symbol.upper(),
-            name=item.get("companyName"),
-            sector=item.get("sector"),
-            industry=item.get("industry"),
-            market_cap=item.get("mktCap"),
-            description=item.get("description"),
-            ceo=item.get("ceo"),
-            ipo_date=ipo_date,
-            exchange=item.get("exchangeShortName"),
+        result = await run_fallback_chain(
+            category="fundamentals",
+            endpoint_id="company_profile",
+            handlers=handlers,
+            per_provider_timeout=16.0,
         )
-
         return ToolResult(
-            data=profile,
-            sources=[_fmp_source(symbol)],
+            data=result.payload,
+            sources=[_provider_source(result.provider, symbol)],
             timing=_timing(tool_name, started_at),
             success=True,
         )
-
-    except FMPUnavailableError as exc:
-        logger.warning("get_company_profile: FMP unavailable for %s — yfinance fallback. %s", symbol, exc)
-        info = await _yf_info(symbol)
-        profile = FMPCompanyProfile(
-            symbol=symbol.upper(),
-            name=info.get("longName") or info.get("shortName"),
-            sector=info.get("sector"),
-            industry=info.get("industry"),
-            market_cap=info.get("marketCap"),
-            description=info.get("longBusinessSummary"),
-            exchange=info.get("exchange"),
-        )
+    except FallbackChainExhaustedError as exc:
         return ToolResult(
-            data=profile,
-            sources=[_yf_source(symbol)],
+            data=FMPCompanyProfile(symbol=symbol.upper()),
             timing=_timing(tool_name, started_at),
-            success=True,
-            error=f"Degraded: FMP unavailable ({exc}). CEO and IPO date omitted (yfinance fallback).",
+            success=False,
+            error=str(exc),
         )
-
     except Exception as exc:
         logger.error("get_company_profile: unexpected error for %s: %s", symbol, exc)
         return ToolResult(
@@ -479,94 +1179,36 @@ async def get_financial_statements(
     period: str = "annual",
     limit: int = 4,
 ) -> ToolResult[list[IncomeStatementSummary]]:
-    """Fetch income statements from FMP.
-
-    Fallback: yfinance ``Ticker.financials`` — EPS and operating margin omitted.
-
-    Parameters
-    ----------
-    period: ``"annual"`` or ``"quarter"``.
-    limit:  Number of periods to return.
-    """
     started_at = _now_utc()
     tool_name = "get_financial_statements"
 
-    from clients.fmp import FmpClient, FMPUnavailableError
+    handlers = {
+        "fmp": lambda: _income_fmp(symbol, period, limit),
+        "yfinance": lambda: _income_yfinance(symbol, limit),
+        "eodhd": lambda: _income_eodhd(symbol, period, limit),
+        "alpha_vantage": lambda: _income_alpha(symbol, period, limit),
+    }
 
     try:
-        async with FmpClient() as fmp:
-            data = await fmp.get(
-                f"/income-statement?symbol={symbol.upper()}",
-                params={"period": period, "limit": limit},
-            )
-
-        rows = data if isinstance(data, list) else []
-        statements: list[IncomeStatementSummary] = []
-        for item in rows:
-            rev = item.get("revenue")
-            gross = item.get("grossProfit")
-            op_income = item.get("operatingIncome")
-            statements.append(IncomeStatementSummary(
-                symbol=symbol.upper(),
-                period=item.get("date", ""),
-                revenue=rev,
-                net_income=item.get("netIncome"),
-                eps=item.get("eps"),
-                gross_margin=(gross / rev) if rev and gross else None,
-                operating_margin=(op_income / rev) if rev and op_income else None,
-            ))
-
+        result = await run_fallback_chain(
+            category="fundamentals",
+            endpoint_id="income_statement",
+            handlers=handlers,
+            per_provider_timeout=18.0,
+        )
         return ToolResult(
-            data=statements,
-            sources=[_fmp_source(symbol)],
+            data=result.payload,
+            sources=[_provider_source(result.provider, symbol)],
             timing=_timing(tool_name, started_at),
             success=True,
         )
-
-    except FMPUnavailableError as exc:
-        logger.warning("get_financial_statements: FMP unavailable for %s — yfinance fallback. %s", symbol, exc)
-        try:
-            import pandas as pd
-            import yfinance as yf
-
-            def _fetch():
-                return yf.Ticker(symbol.upper()).financials
-
-            fin = await _run_sync(_fetch)
-            statements = []
-            if fin is not None and not fin.empty:
-                for col in list(fin.columns)[:limit]:
-                    def _safe(row: str):
-                        if row in fin.index:
-                            v = fin.loc[row, col]
-                            return float(v) if v is not None and not pd.isna(v) else None
-                        return None
-
-                    rev = _safe("Total Revenue")
-                    gross = _safe("Gross Profit")
-                    statements.append(IncomeStatementSummary(
-                        symbol=symbol.upper(),
-                        period=str(col.date()) if hasattr(col, "date") else str(col),
-                        revenue=rev,
-                        net_income=_safe("Net Income"),
-                        gross_margin=(gross / rev) if rev and gross and rev != 0 else None,
-                    ))
-
-            return ToolResult(
-                data=statements,
-                sources=[_yf_source(symbol)],
-                timing=_timing(tool_name, started_at),
-                success=True,
-                error=f"Degraded: FMP unavailable ({exc}). EPS and operating margin omitted (yfinance fallback).",
-            )
-        except Exception as yf_exc:
-            return ToolResult(
-                data=[],
-                timing=_timing(tool_name, started_at),
-                success=False,
-                error=f"FMP unavailable ({exc}); yfinance fallback also failed: {yf_exc}",
-            )
-
+    except FallbackChainExhaustedError as exc:
+        return ToolResult(
+            data=[],
+            timing=_timing(tool_name, started_at),
+            success=False,
+            error=str(exc),
+        )
     except Exception as exc:
         logger.error("get_financial_statements: error for %s: %s", symbol, exc)
         return ToolResult(
@@ -582,83 +1224,36 @@ async def get_balance_sheet(
     period: str = "annual",
     limit: int = 4,
 ) -> ToolResult[list[BalanceSheetSummary]]:
-    """Fetch balance sheets from FMP.
-
-    Fallback: yfinance ``Ticker.balance_sheet`` — ``book_value_per_share`` omitted.
-    """
     started_at = _now_utc()
     tool_name = "get_balance_sheet"
 
-    from clients.fmp import FmpClient, FMPUnavailableError
+    handlers = {
+        "fmp": lambda: _balance_fmp(symbol, period, limit),
+        "yfinance": lambda: _balance_yfinance(symbol, limit),
+        "eodhd": lambda: _balance_eodhd(symbol, period, limit),
+        "alpha_vantage": lambda: _balance_alpha(symbol, period, limit),
+    }
 
     try:
-        async with FmpClient() as fmp:
-            data = await fmp.get(
-                f"/balance-sheet-statement?symbol={symbol.upper()}",
-                params={"period": period, "limit": limit},
-            )
-
-        rows = data if isinstance(data, list) else []
-        sheets: list[BalanceSheetSummary] = []
-        for item in rows:
-            sheets.append(BalanceSheetSummary(
-                symbol=symbol.upper(),
-                period=item.get("date", ""),
-                total_assets=item.get("totalAssets"),
-                total_debt=item.get("totalDebt"),
-                cash=item.get("cashAndCashEquivalents"),
-                book_value_per_share=item.get("bookValuePerShare"),
-            ))
-
+        result = await run_fallback_chain(
+            category="fundamentals",
+            endpoint_id="balance_sheet",
+            handlers=handlers,
+            per_provider_timeout=18.0,
+        )
         return ToolResult(
-            data=sheets,
-            sources=[_fmp_source(symbol)],
+            data=result.payload,
+            sources=[_provider_source(result.provider, symbol)],
             timing=_timing(tool_name, started_at),
             success=True,
         )
-
-    except FMPUnavailableError as exc:
-        logger.warning("get_balance_sheet: FMP unavailable for %s — yfinance fallback. %s", symbol, exc)
-        try:
-            import pandas as pd
-            import yfinance as yf
-
-            def _fetch():
-                return yf.Ticker(symbol.upper()).balance_sheet
-
-            bs = await _run_sync(_fetch)
-            sheets = []
-            if bs is not None and not bs.empty:
-                for col in list(bs.columns)[:limit]:
-                    def _safe(row: str, col=col):
-                        if row in bs.index:
-                            v = bs.loc[row, col]
-                            return float(v) if v is not None and not pd.isna(v) else None
-                        return None
-
-                    sheets.append(BalanceSheetSummary(
-                        symbol=symbol.upper(),
-                        period=str(col.date()) if hasattr(col, "date") else str(col),
-                        total_assets=_safe("Total Assets"),
-                        total_debt=_safe("Total Debt") or _safe("Long Term Debt"),
-                        cash=_safe("Cash And Cash Equivalents") or _safe("Cash"),
-                    ))
-
-            return ToolResult(
-                data=sheets,
-                sources=[_yf_source(symbol)],
-                timing=_timing(tool_name, started_at),
-                success=True,
-                error=f"Degraded: FMP unavailable ({exc}). Book value per share omitted (yfinance fallback).",
-            )
-        except Exception as yf_exc:
-            return ToolResult(
-                data=[],
-                timing=_timing(tool_name, started_at),
-                success=False,
-                error=f"FMP unavailable ({exc}); yfinance fallback also failed: {yf_exc}",
-            )
-
+    except FallbackChainExhaustedError as exc:
+        return ToolResult(
+            data=[],
+            timing=_timing(tool_name, started_at),
+            success=False,
+            error=str(exc),
+        )
     except Exception as exc:
         logger.error("get_balance_sheet: error for %s: %s", symbol, exc)
         return ToolResult(
@@ -670,71 +1265,34 @@ async def get_balance_sheet(
 
 
 async def get_institutional_holders(symbol: str) -> ToolResult[list[InstitutionalHolder]]:
-    """Fetch institutional ownership from FMP.
-
-    Fallback: yfinance ``Ticker.institutional_holders`` — ``change_pct`` omitted.
-    """
     started_at = _now_utc()
     tool_name = "get_institutional_holders"
 
-    from clients.fmp import FmpClient, FMPUnavailableError
+    handlers = {
+        "fmp": lambda: _holders_fmp(symbol),
+        "yfinance": lambda: _holders_yfinance(symbol),
+    }
 
     try:
-        async with FmpClient() as fmp:
-            data = await fmp.get(f"/institutional-holder/{symbol.upper()}")
-
-        rows = data if isinstance(data, list) else []
-        holders: list[InstitutionalHolder] = []
-        for item in rows:
-            holders.append(InstitutionalHolder(
-                holder_name=item.get("holder", ""),
-                shares=item.get("shares"),
-                pct_ownership=item.get("weightedPercent") or item.get("percentage"),
-                change_pct=item.get("change"),
-            ))
-
+        result = await run_fallback_chain(
+            category="fundamentals",
+            endpoint_id="institutional_holders",
+            handlers=handlers,
+            per_provider_timeout=16.0,
+        )
         return ToolResult(
-            data=holders,
-            sources=[_fmp_source(symbol)],
+            data=result.payload,
+            sources=[_provider_source(result.provider, symbol)],
             timing=_timing(tool_name, started_at),
             success=True,
         )
-
-    except FMPUnavailableError as exc:
-        logger.warning("get_institutional_holders: FMP unavailable for %s — yfinance fallback. %s", symbol, exc)
-        try:
-            import yfinance as yf
-
-            def _fetch():
-                return yf.Ticker(symbol.upper()).institutional_holders
-
-            df = await _run_sync(_fetch)
-            holders = []
-            if df is not None and not df.empty:
-                for _, row in df.iterrows():
-                    shares_val = row.get("Shares")
-                    pct_val = row.get("% Out")
-                    holders.append(InstitutionalHolder(
-                        holder_name=str(row.get("Holder", "")),
-                        shares=int(shares_val) if shares_val is not None else None,
-                        pct_ownership=float(pct_val) if pct_val is not None else None,
-                    ))
-
-            return ToolResult(
-                data=holders,
-                sources=[_yf_source(symbol)],
-                timing=_timing(tool_name, started_at),
-                success=True,
-                error=f"Degraded: FMP unavailable ({exc}). Ownership change data omitted (yfinance fallback).",
-            )
-        except Exception as yf_exc:
-            return ToolResult(
-                data=[],
-                timing=_timing(tool_name, started_at),
-                success=False,
-                error=f"FMP unavailable ({exc}); yfinance fallback also failed: {yf_exc}",
-            )
-
+    except FallbackChainExhaustedError as exc:
+        return ToolResult(
+            data=[],
+            timing=_timing(tool_name, started_at),
+            success=False,
+            error=str(exc),
+        )
     except Exception as exc:
         logger.error("get_institutional_holders: error for %s: %s", symbol, exc)
         return ToolResult(
@@ -746,65 +1304,52 @@ async def get_institutional_holders(symbol: str) -> ToolResult[list[Institutiona
 
 
 async def get_peers(symbol: str) -> ToolResult[PeerComparison]:
-    """Fetch peer tickers from FMP.
-
-    Fallback: yfinance sector/industry info — peer list will be empty.
-    """
     started_at = _now_utc()
     tool_name = "get_peers"
 
-    from clients.fmp import FmpClient, FMPUnavailableError
+    handlers = {
+        "fmp": lambda: _peers_fmp(symbol),
+        "finnhub": lambda: _peers_finnhub(symbol),
+    }
 
     try:
-        async with FmpClient() as fmp:
-            data = await fmp.get("/stock-peers", params={"symbol": symbol.upper()})
+        result = await run_fallback_chain(
+            category="fundamentals",
+            endpoint_id="peers",
+            handlers=handlers,
+            per_provider_timeout=16.0,
+        )
+        peer_comp: PeerComparison = result.payload
 
-        items = data if isinstance(data, list) else [data]
-        peers_list: list[str] = []
-        if items:
-            peers_list = [
-                p for p in (items[0].get("peersList") or [])
-                if p and p.upper() != symbol.upper()
-            ]
-
-        # FMP /stock_peers doesn't include sector/industry — fetch from profile
-        sector = industry = None
-        try:
-            profile_result = await get_company_profile(symbol)
-            if profile_result.success and profile_result.data:
-                sector = profile_result.data.sector
-                industry = profile_result.data.industry
-        except Exception:
-            pass
+        if not peer_comp.sector or not peer_comp.industry:
+            info = await _yf_info(symbol)
+            if info:
+                peer_comp = PeerComparison(
+                    symbol=peer_comp.symbol,
+                    peers=peer_comp.peers,
+                    sector=peer_comp.sector or info.get("sector"),
+                    industry=peer_comp.industry or info.get("industry"),
+                )
 
         return ToolResult(
-            data=PeerComparison(
-                symbol=symbol.upper(),
-                peers=peers_list,
-                sector=sector,
-                industry=industry,
-            ),
-            sources=[_fmp_source(symbol)],
+            data=peer_comp,
+            sources=[_provider_source(result.provider, symbol)],
             timing=_timing(tool_name, started_at),
             success=True,
         )
-
-    except FMPUnavailableError as exc:
-        logger.warning("get_peers: FMP unavailable for %s — yfinance fallback. %s", symbol, exc)
+    except FallbackChainExhaustedError as exc:
         info = await _yf_info(symbol)
         return ToolResult(
             data=PeerComparison(
                 symbol=symbol.upper(),
                 peers=[],
-                sector=info.get("sector"),
-                industry=info.get("industry"),
+                sector=info.get("sector") if info else None,
+                industry=info.get("industry") if info else None,
             ),
-            sources=[_yf_source(symbol)],
             timing=_timing(tool_name, started_at),
-            success=True,
-            error=f"Degraded: FMP unavailable ({exc}). Peer list unavailable; sector/industry from yfinance only.",
+            success=False,
+            error=str(exc),
         )
-
     except Exception as exc:
         logger.error("get_peers: error for %s: %s", symbol, exc)
         return ToolResult(
@@ -819,89 +1364,34 @@ async def screen_stocks(
     criteria: dict[str, Any],
     limit: int = 20,
 ) -> ToolResult[list[ScreeningHit]]:
-    """Screen stocks using FMP's stock screener endpoint.
-
-    Parameters
-    ----------
-    criteria:
-        FMP screener query parameters, e.g.::
-
-            {
-                "marketCapMoreThan": 1_000_000_000,
-                "peRatioLowerThan": 15,
-                "sector": "Technology",
-                "country": "US",
-            }
-
-    limit:
-        Maximum number of results to return.
-
-    Note
-    ----
-    yfinance has no equivalent screener. If FMP is unavailable this function
-    returns ``success=False`` rather than a degraded result.
-    """
     started_at = _now_utc()
     tool_name = "screen_stocks"
 
-    from clients.fmp import FmpClient, FMPUnavailableError
-
-    # Allowlist of safe FMP screener parameters to prevent query injection
-    _SCREEN_ALLOWLIST = {
-        "marketCapMoreThan", "marketCapLowerThan",
-        "priceMoreThan", "priceLowerThan",
-        "betaMoreThan", "betaLowerThan",
-        "volumeMoreThan", "volumeLowerThan",
-        "dividendMoreThan", "dividendLowerThan",
-        "isEtf", "isActivelyTrading",
-        "sector", "industry", "country", "exchange",
-        "peRatioMoreThan", "peRatioLowerThan",
+    handlers = {
+        "fmp": lambda: _screener_fmp(criteria, limit),
     }
 
     try:
-        params: dict[str, Any] = {
-            k: v for k, v in criteria.items() if k in _SCREEN_ALLOWLIST
-        }
-        params["limit"] = limit
-
-        async with FmpClient() as fmp:
-            data = await fmp.get("/stock-screener", params=params)
-
-        rows = data if isinstance(data, list) else []
-        hits: list[ScreeningHit] = []
-        for item in rows:
-            hits.append(ScreeningHit(
-                symbol=item.get("symbol", ""),
-                name=item.get("companyName"),
-                pe_ratio=item.get("pe"),
-                price_to_book=item.get("priceBookValueRatio"),
-                market_cap=item.get("marketCap"),
-                sector=item.get("sector"),
-            ))
+        result = await run_fallback_chain(
+            category="fundamentals",
+            endpoint_id="stock_screener",
+            handlers=handlers,
+            per_provider_timeout=20.0,
+        )
 
         return ToolResult(
-            data=hits,
-            sources=[SourceRef(
-                url="https://financialmodelingprep.com/api/v3/stock-screener",  # type: ignore[arg-type]
-                title="FMP Stock Screener",
-                fetched_at=_now_utc(),
-            )],
+            data=result.payload,
+            sources=[_provider_source(result.provider, "SCREEN")],
             timing=_timing(tool_name, started_at),
             success=True,
         )
-
-    except FMPUnavailableError as exc:
+    except FallbackChainExhaustedError as exc:
         return ToolResult(
             data=[],
             timing=_timing(tool_name, started_at),
             success=False,
-            error=(
-                f"Stock screening requires the FMP API (currently unavailable: {exc}). "
-                "yfinance has no equivalent screener endpoint. "
-                "Add FMP_API_KEY to backend/.env to enable this feature."
-            ),
+            error=str(exc),
         )
-
     except Exception as exc:
         logger.error("screen_stocks: %s", exc)
         return ToolResult(

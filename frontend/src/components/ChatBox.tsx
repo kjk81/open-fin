@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext";
-import type { MentionOption, TradeOrder } from "../types";
+import type { AgentMode, MentionOption, TradeOrder } from "../types";
 import { ChatMessage } from "./ChatMessage";
 import { MentionPopover } from "./MentionPopover";
 import { TradeTicket } from "./TradeTicket";
+
+const AGENT_MODES: { value: AgentMode; label: string }[] = [
+  { value: "genie", label: "Genie" },
+  { value: "fundamentals", label: "Fundamentals" },
+  { value: "sentiment", label: "Sentiment" },
+  { value: "technical", label: "Technical" },
+];
 
 // Parse @mentions from text and return context_refs array
 function extractContextRefs(text: string): string[] {
@@ -33,8 +40,8 @@ function getMentionQuery(value: string, cursorPos: number): string | null {
 }
 
 export function ChatBox() {
-  const { state, sendMessage, selectTicker, reloadPortfolio, addSystemMessage } = useAppContext();
-  const { chatMessages, chatStreaming, portfolio } = state;
+  const { state, sendMessage, selectTicker, reloadPortfolio, addSystemMessage, setAgentMode } = useAppContext();
+  const { chatMessages, chatStreaming, portfolio, agentMode } = state;
 
   const [text, setText] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -131,7 +138,7 @@ export function ChatBox() {
     if (tickerRef) {
       selectTicker(tickerRef);
     }
-    sendMessage(trimmed, contextRefs);
+    sendMessage(trimmed, contextRefs, agentMode);
     setText("");
     setMentionQuery(null);
     requestAnimationFrame(() => {
@@ -163,6 +170,20 @@ export function ChatBox() {
           />
         ))}
         <div ref={messagesEndRef} />
+      </div>
+
+      {/* Mode selector */}
+      <div className="mode-selector">
+        {AGENT_MODES.map((m) => (
+          <button
+            key={m.value}
+            className={`mode-selector-btn${agentMode === m.value ? " mode-selector-btn--active" : ""}`}
+            onClick={() => setAgentMode(m.value)}
+            disabled={chatStreaming}
+          >
+            {m.label}
+          </button>
+        ))}
       </div>
 
       {/* Input area */}

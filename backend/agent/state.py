@@ -76,3 +76,7 @@ class AgentState(TypedDict):
     anomaly_context: str
     screening_results: dict
     filings_context: str
+
+    # Agent mode: "genie" | "fundamentals" | "sentiment" | "technical"
+    # Written once at start — no reducer needed.
+    agent_mode: str

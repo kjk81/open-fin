@@ -391,7 +391,8 @@ def _get_tool_bound_model(tools: list, role: str = "subagent"):
 def _build_tool_messages(state: AgentState) -> list[BaseMessage]:
     """System prompt + full state-message replay for ``route_finance_query``."""
 
-    parts: list[str] = [get_router_soul_prompt()]
+    agent_mode = state.get("agent_mode", "genie")
+    parts: list[str] = [get_router_soul_prompt(agent_mode=agent_mode)]
 
     injected = state.get("injected_context", "")
     if injected:
@@ -575,7 +576,8 @@ async def finalize_response(state: AgentState) -> dict:
                 break
 
     # --- Build the synthesis prompt with all accumulated context ---
-    ctx_parts: list[str] = [get_finalize_prompt()]
+    agent_mode = state.get("agent_mode", "genie")
+    ctx_parts: list[str] = [get_finalize_prompt(agent_mode=agent_mode)]
 
     injected = state.get("injected_context", "")
     if injected:
@@ -774,11 +776,27 @@ async def fallback_tool_execution(state: AgentState) -> dict:
 
 def _route_after_context(state: AgentState) -> str:
     """After context injection, choose between the tool loop and generation."""
+    from .mode_config import get_mode_config
+
+    agent_mode = state.get("agent_mode", "genie")
+    cfg = get_mode_config(agent_mode)
+
     intent = state.get("intent", "general_chat")
+
+    # Mode-specific intent override (e.g. fundamentals forces ticker_deep_dive)
+    if cfg.intent_override and intent not in _FINANCE_INTENTS:
+        logger.info(
+            "Mode '%s' overriding intent '%s' → '%s'",
+            agent_mode, intent, cfg.intent_override,
+        )
+        intent = cfg.intent_override
+        # Mutate state for downstream nodes
+        state["intent"] = intent  # type: ignore[index]
+
     if intent in _FINANCE_INTENTS:
-        logger.debug("Routing to finance tool loop (intent=%s)", intent)
+        logger.debug("Routing to finance tool loop (intent=%s, mode=%s)", intent, agent_mode)
         return "route_finance_query"
-    logger.debug("Routing to generation_node (intent=%s)", intent)
+    logger.debug("Routing to generation_node (intent=%s, mode=%s)", intent, agent_mode)
     return "generation_node"
 
 

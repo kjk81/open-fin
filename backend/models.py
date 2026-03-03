@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Float, DateTime, Text, Integer, Boolean, ForeignKey
+from sqlalchemy import String, Float, DateTime, Text, Integer, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from database import Base
 
@@ -175,3 +175,21 @@ class SchemaVersion(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     version: Mapped[int] = mapped_column(Integer, default=0)
     migrated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AnalysisSectionCache(Base):
+    """Per-ticker, per-section cache for analysis panel data."""
+
+    __tablename__ = "analysis_section_cache"
+    __table_args__ = (
+        UniqueConstraint("ticker", "section", name="uq_analysis_ticker_section"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(20), index=True)
+    section: Mapped[str] = mapped_column(String(30))  # "fundamentals" | "sentiment" | "technical"
+    content: Mapped[str] = mapped_column(Text)
+    rating: Mapped[str] = mapped_column(String(30), default="")
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    source: Mapped[str] = mapped_column(String(20), default="llm")  # "llm" | "kg" | "cache"
+    ttl_seconds: Mapped[int] = mapped_column(Integer, default=14400)  # 4h for technical, 24h for others

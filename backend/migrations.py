@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Version constant — bump when adding a new migration below
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +58,39 @@ def _migration_2(engine: Engine) -> None:
     pass
 
 
+def _migration_3(engine: Engine) -> None:
+    """Add analysis_section_cache table."""
+    insp = inspect(engine)
+    if "analysis_section_cache" in insp.get_table_names():
+        logger.debug("Migration 3: analysis_section_cache already exists, skipping.")
+        return
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE analysis_section_cache ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  ticker VARCHAR(20) NOT NULL,"
+            "  section VARCHAR(30) NOT NULL,"
+            "  content TEXT NOT NULL,"
+            "  rating VARCHAR(30) DEFAULT '',"
+            "  generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  source VARCHAR(20) DEFAULT 'llm',"
+            "  ttl_seconds INTEGER DEFAULT 14400,"
+            "  CONSTRAINT uq_analysis_ticker_section UNIQUE (ticker, section)"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_analysis_section_cache_ticker "
+            "ON analysis_section_cache (ticker)"
+        ))
+    logger.info("Migration 3: created analysis_section_cache table.")
+
+
 # Ordered list — index 0 = migration 1, index N-1 = migration N
 MIGRATIONS: list[Callable[[Engine], None]] = [
     _migration_1,
     _migration_2,
+    _migration_3,
 ]
 
 

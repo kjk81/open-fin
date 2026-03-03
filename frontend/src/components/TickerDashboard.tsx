@@ -1,18 +1,18 @@
 import { useState } from "react";
 import { useAppContext } from "../context/AppContext";
+import { AnalysisPanel } from "./AnalysisPanel";
+import { RecentEventTimeline } from "./RecentEventTimeline";
 import { Spinner } from "./Spinner";
 import { TickerCard } from "./TickerCard";
 
 export function TickerDashboard() {
-  const { state, toggleWatchlist } = useAppContext();
+  const { state, toggleWatchlist, navigateToDashboard } = useAppContext();
   const {
     activeTicker,
     activeTickerLoading,
     activeTickerError,
     selectedSymbol,
-    tickerReport,
-    tickerReportLoading,
-    tickerReportError,
+    tickerAnalysis,
     watchlist,
   } = state;
   const [starring, setStarring] = useState(false);
@@ -32,7 +32,12 @@ export function TickerDashboard() {
   return (
     <aside className="pane-dashboard">
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
-        <h2 className="pane-title">Ticker</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <button className="ticker-back-btn" onClick={navigateToDashboard}>
+            ← Back
+          </button>
+          <h2 className="pane-title">Ticker</h2>
+        </div>
         {selectedSymbol && (
           <button
             className="btn-ghost"
@@ -68,7 +73,7 @@ export function TickerDashboard() {
         </div>
       )}
 
-      {/* Ticker stats */}
+      {/* Ticker stats + analysis panel */}
       {activeTicker && !activeTickerLoading && (
         <>
           <TickerCard info={activeTicker} />
@@ -77,35 +82,10 @@ export function TickerDashboard() {
             <h3 style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "12px" }}>
               AI Analysis
             </h3>
-
-            {tickerReportLoading && tickerReport === "" && !tickerReportError && (
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-muted)", fontSize: "13px" }}>
-                <Spinner />
-                Generating AI analysis...
-              </div>
-            )}
-
-            {tickerReportError && !tickerReportLoading && (
-              <div style={{ color: "var(--red)", fontSize: "13px" }}>
-                {tickerReportError}
-              </div>
-            )}
-
-            {!tickerReportLoading && !tickerReportError && !tickerReport && (
-              <p style={{ color: "var(--red)", fontSize: "13px" }}>
-                No analysis available. Please verify your LLM API key configuration and ensure sufficient data payload is loaded.
-              </p>
-            )}
-
-            {tickerReport && (
-              <p style={{ fontSize: "13px", lineHeight: 1.7, color: "var(--text)", whiteSpace: "pre-wrap" }}>
-                {tickerReport}
-                {tickerReportLoading && (
-                  <span className="typing-cursor" />
-                )}
-              </p>
-            )}
+            <AnalysisPanel analysis={tickerAnalysis} />
           </div>
+
+          {selectedSymbol && <RecentEventTimeline symbol={selectedSymbol} />}
         </>
       )}
     </aside>

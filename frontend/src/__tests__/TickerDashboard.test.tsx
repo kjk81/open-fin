@@ -5,9 +5,7 @@
  * - Empty / no ticker selected
  * - Loading ticker data
  * - Ticker data error
- * - AI analysis: loading spinner (no report yet)
- * - AI analysis: streaming (partial report + typing cursor)
- * - AI analysis: complete (report done, no spinner)
+ * - AI analysis panel rendering (via AnalysisPanel)
  * - Watchlist star button interaction
  */
 
@@ -15,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { TickerDashboard } from "../components/TickerDashboard";
 import * as AppContextModule from "../context/AppContext";
-import type { TickerInfo } from "../types";
+import type { TickerInfo, TickerAnalysis } from "../types";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -39,6 +37,19 @@ vi.mock("../components/TickerCard", () => ({
   ),
 }));
 
+// Stub AnalysisPanel to inspect the analysis prop
+vi.mock("../components/AnalysisPanel", () => ({
+  AnalysisPanel: ({ analysis }: { analysis: TickerAnalysis }) => (
+    <div data-testid="analysis-panel" data-loading={analysis.loading} data-error={analysis.error ?? ""} />
+  ),
+}));
+
+vi.mock("../components/RecentEventTimeline", () => ({
+  RecentEventTimeline: ({ symbol }: { symbol: string }) => (
+    <div data-testid="recent-events-timeline" data-symbol={symbol} />
+  ),
+}));
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -58,10 +69,18 @@ const mockTicker: TickerInfo = {
   beta: 1.23,
 };
 
+const emptyAnalysis: TickerAnalysis = {
+  loading: false,
+  error: null,
+  overallRating: null,
+  sections: {},
+};
+
 function makeContext(overrides: Partial<ReturnType<typeof AppContextModule.useAppContext>["state"]> = {}) {
   return {
     state: {
       backendStatus: "running" as const,
+      migrationError: null,
       workerOnline: true,
       portfolio: [],
       watchlist: [],
@@ -70,11 +89,15 @@ function makeContext(overrides: Partial<ReturnType<typeof AppContextModule.useAp
       activeTickerError: null,
       chatMessages: [],
       chatStreaming: false,
-      tickerReport: "",
-      tickerReportLoading: false,
+      tickerAnalysis: { ...emptyAnalysis },
       selectedSymbol: null,
+      viewMode: "ticker" as const,
       terminalLogs: [],
       terminalOpen: false,
+      kgLastUpdated: 0,
+      kgLastTicker: null,
+      debugMode: false,
+      agentMode: "genie" as const,
       ...overrides,
     },
     selectTicker: vi.fn(),
@@ -85,7 +108,9 @@ function makeContext(overrides: Partial<ReturnType<typeof AppContextModule.useAp
     addSystemMessage: vi.fn(),
     toggleTerminal: vi.fn(),
     clearTerminalLogs: vi.fn(),
+    navigateToDashboard: vi.fn(),
     setDebugMode: vi.fn(),
+    setAgentMode: vi.fn(),
   };
 }
 
@@ -155,15 +180,13 @@ describe("TickerDashboard", () => {
     expect(screen.queryByTestId("ticker-card")).not.toBeInTheDocument();
   });
 
-  // ── Ticker data loaded, AI analysis loading ──────────────────────────────
+  // ── Ticker data loaded, analysis panel rendering ─────────────────────────
 
   it("shows TickerCard when ticker data is available", () => {
     setup({
       selectedSymbol: "AAPL",
       activeTickerLoading: false,
       activeTicker: mockTicker,
-      tickerReport: "",
-      tickerReportLoading: false,
     });
     expect(screen.getByTestId("ticker-card")).toBeInTheDocument();
     expect(screen.getByTestId("ticker-card")).toHaveAttribute("data-symbol", "AAPL");
@@ -178,82 +201,27 @@ describe("TickerDashboard", () => {
     expect(screen.getByText("AI Analysis")).toBeInTheDocument();
   });
 
-  it("shows spinner and 'Generating AI analysis...' while loading with no report", () => {
+  it("renders AnalysisPanel with tickerAnalysis state", () => {
     setup({
       selectedSymbol: "AAPL",
       activeTickerLoading: false,
       activeTicker: mockTicker,
-      tickerReport: "",
-      tickerReportLoading: true,
+      tickerAnalysis: { ...emptyAnalysis, loading: true },
     });
-    expect(screen.getByText("Generating AI analysis...")).toBeInTheDocument();
-    expect(screen.getByTestId("spinner")).toBeInTheDocument();
+    const panel = screen.getByTestId("analysis-panel");
+    expect(panel).toBeInTheDocument();
+    expect(panel).toHaveAttribute("data-loading", "true");
   });
 
-  it("shows the fallback error message when the AI analysis completes with no report", () => {
+  it("passes analysis error to AnalysisPanel", () => {
     setup({
       selectedSymbol: "AAPL",
       activeTickerLoading: false,
       activeTicker: mockTicker,
-      tickerReport: "",
-      tickerReportLoading: false,
+      tickerAnalysis: { ...emptyAnalysis, error: "LLM failed" },
     });
-    expect(screen.getByText(/No analysis available. Please verify your LLM API key configuration/i)).toBeInTheDocument();
-  });
-
-  it("does NOT show the loading spinner message when tickerReport already has content", () => {
-    setup({
-      selectedSymbol: "AAPL",
-      activeTickerLoading: false,
-      activeTicker: mockTicker,
-      tickerReport: "Apple has strong fundamentals.",
-      tickerReportLoading: true,
-    });
-    expect(screen.queryByText("Generating AI analysis...")).not.toBeInTheDocument();
-  });
-
-  // ── AI analysis streaming state ──────────────────────────────────────────
-
-  it("shows partial report text with typing cursor while still loading", () => {
-    setup({
-      selectedSymbol: "AAPL",
-      activeTickerLoading: false,
-      activeTicker: mockTicker,
-      tickerReport: "Apple has strong",
-      tickerReportLoading: true,
-    });
-    expect(screen.getByText(/Apple has strong/)).toBeInTheDocument();
-    // Typing cursor is a span with class "typing-cursor"
-    const cursor = document.querySelector(".typing-cursor");
-    expect(cursor).toBeInTheDocument();
-  });
-
-  // ── AI analysis complete state ───────────────────────────────────────────
-
-  it("shows full report text without typing cursor when loading is done", () => {
-    setup({
-      selectedSymbol: "AAPL",
-      activeTickerLoading: false,
-      activeTicker: mockTicker,
-      tickerReport: "Apple Inc. has strong fundamentals with excellent cash flow.",
-      tickerReportLoading: false,
-    });
-    expect(
-      screen.getByText(/Apple Inc\. has strong fundamentals/),
-    ).toBeInTheDocument();
-    const cursor = document.querySelector(".typing-cursor");
-    expect(cursor).not.toBeInTheDocument();
-  });
-
-  it("does not show loading spinner message when analysis is complete", () => {
-    setup({
-      selectedSymbol: "AAPL",
-      activeTickerLoading: false,
-      activeTicker: mockTicker,
-      tickerReport: "Analysis complete.",
-      tickerReportLoading: false,
-    });
-    expect(screen.queryByText("Generating AI analysis...")).not.toBeInTheDocument();
+    const panel = screen.getByTestId("analysis-panel");
+    expect(panel).toHaveAttribute("data-error", "LLM failed");
   });
 
   // ── Watchlist star button ────────────────────────────────────────────────
@@ -307,11 +275,26 @@ describe("TickerDashboard", () => {
     expect(screen.queryByRole("button", { name: /watchlist/i })).not.toBeInTheDocument();
   });
 
+  it("calls navigateToDashboard when back button is clicked", () => {
+    const { ctx } = setup({ selectedSymbol: "AAPL", activeTicker: mockTicker, activeTickerLoading: false });
+    fireEvent.click(screen.getByRole("button", { name: /back/i }));
+    expect(ctx.navigateToDashboard).toHaveBeenCalledTimes(1);
+  });
+
   // ── Ticker panel header ──────────────────────────────────────────────────
 
   it("always shows the Ticker panel heading", () => {
     setup();
     expect(screen.getByText("Ticker")).toBeInTheDocument();
+  });
+
+  it("renders recent event timeline when ticker data is available", () => {
+    setup({
+      selectedSymbol: "AAPL",
+      activeTickerLoading: false,
+      activeTicker: mockTicker,
+    });
+    expect(screen.getByTestId("recent-events-timeline")).toHaveAttribute("data-symbol", "AAPL");
   });
 
   // ── Stale message check ──────────────────────────────────────────────────
@@ -321,55 +304,25 @@ describe("TickerDashboard", () => {
       selectedSymbol: "AAPL",
       activeTickerLoading: false,
       activeTicker: mockTicker,
-      tickerReport: "",
-      tickerReportLoading: true,
+      tickerAnalysis: { ...emptyAnalysis, loading: true },
     });
     expect(screen.queryByText(/Checking report cache/i)).not.toBeInTheDocument();
   });
 
-  // ── [object Object] regression (Issue 1) ─────────────────────────────────
+  // ── [object Object] regression ───────────────────────────────────────────
 
-  it("never renders [object Object] when tickerReport is a normal string", () => {
-    // Regression guard: if a non-string value ever reaches tickerReport state,
-    // React would render "[object Object]". This must never happen.
+  it("never renders [object Object] in the analysis panel area", () => {
     setup({
       selectedSymbol: "AAPL",
       activeTickerLoading: false,
       activeTicker: mockTicker,
-      tickerReport: "AAPL has strong fundamentals.",
-      tickerReportLoading: false,
+      tickerAnalysis: {
+        ...emptyAnalysis,
+        sections: {
+          fundamentals: { content: "Strong fundamentals.", rating: "positive", source: "kg", loading: false },
+        },
+      },
     });
     expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
-    expect(screen.getByText(/AAPL has strong fundamentals/)).toBeInTheDocument();
-  });
-
-  it("shows tickerReportError message (not [object Object]) when analysis errors", () => {
-    // When the LLM call fails, tickerReportError is set and tickerReport stays
-    // empty. The component must render the error string, not an object.
-    setup({
-      selectedSymbol: "AAPL",
-      activeTickerLoading: false,
-      activeTicker: mockTicker,
-      tickerReport: "",
-      tickerReportLoading: false,
-      tickerReportError:
-        "No LLM provider available or all providers failed. " +
-        "Configure at least one provider in backend/.env.",
-    });
-    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
-    expect(screen.getByText(/No LLM provider available/)).toBeInTheDocument();
-  });
-
-  it("shows the 'No analysis available' fallback and NOT [object Object] when report is empty and no error", () => {
-    setup({
-      selectedSymbol: "AAPL",
-      activeTickerLoading: false,
-      activeTicker: mockTicker,
-      tickerReport: "",
-      tickerReportLoading: false,
-      tickerReportError: null,
-    });
-    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
-    expect(screen.getByText(/No analysis available/i)).toBeInTheDocument();
   });
 });
