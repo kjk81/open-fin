@@ -2686,3 +2686,160 @@ body {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+/* ── Verification Badge ──────────────────────────────────────────────────── */
+
+.verification-badge-wrap {
+  position: relative;
+  display: inline-block;
+  margin: 6px 0 2px;
+}
+
+.verification-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.15s;
+}
+
+.verification-badge:hover {
+  opacity: 1;
+}
+
+.verification-badge--warning {
+  color: #f59e0b;
+}
+
+.verification-badge--critical {
+  color: #ef4444;
+}
+
+.verification-badge-count {
+  background: currentColor;
+  color: var(--bg-app, #0f0f0f);
+  border-radius: 999px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+}
+
+.verification-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 200;
+  min-width: 260px;
+  max-width: 380px;
+  background: var(--surface, #1a1a1a);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 6px;
+  padding: 10px 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.verification-popover-header {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted, #666);
+  margin-bottom: 8px;
+}
+
+.verification-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.verification-list--critical .verification-item {
+  color: #ef4444;
+}
+
+.verification-item {
+  font-size: 12px;
+  color: var(--text, #e0e0e0);
+  line-height: 1.4;
+  padding-left: 10px;
+  position: relative;
+}
+
+.verification-item::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+}
+
+/* ── Save to Library Button ──────────────────────────────────────────────── */
+
+.save-library-btn {
+  font-size: 11px;
+}
+
+.save-library-btn--saved {
+  font-size: 11px;
+  color: var(--accent, #3b82f6);
+  padding: 4px 0;
+}
+
+/* ── Consent Dialog ──────────────────────────────────────────────────────── */
+
+.consent-dialog {
+  max-width: 420px;
+}
+
+.consent-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.consent-description {
+  font-size: 13px;
+  color: var(--text, #e0e0e0);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.consent-detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.consent-label {
+  color: var(--text-muted, #666);
+  min-width: 56px;
+  flex-shrink: 0;
+}
+
+.consent-value {
+  color: var(--text, #e0e0e0);
+}
+
+.consent-expiry {
+  color: var(--text-muted, #666);
+  font-size: 11px;
+}
+
+.consent-error {
+  font-size: 12px;
+  color: #ef4444;
+  padding: 6px 8px;
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 4px;
+}

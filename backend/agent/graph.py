@@ -1104,6 +1104,17 @@ FINANCE_TOOLS: list = [
 
 _TOOL_MAP: dict[str, Any] = {t.name: t for t in FINANCE_TOOLS}
 
+# Startup: warn about any FINANCE_TOOLS not explicitly in the action registry.
+from .action_registry import validate_registry_coverage as _validate_registry_coverage
+_unregistered = _validate_registry_coverage([t.name for t in FINANCE_TOOLS])
+if _unregistered:
+    logger.warning(
+        "action_registry: %d tool(s) missing from TOOL_ACTION_REGISTRY "
+        "(defaulting to READ_ONLY): %s",
+        len(_unregistered),
+        _unregistered,
+    )
+
 # ---------------------------------------------------------------------------
 # Helper: obtain a tool-bound LLM model from the provider fallback chain
 # ---------------------------------------------------------------------------
@@ -1360,6 +1371,7 @@ async def execute_tool_calls(state: AgentState) -> dict:
     already_executed: set[str] = set(state.get("executed_skills", []))
     newly_executed: list[str] = []
     executed_count = 0
+    preview_entries: list[dict] = []  # ActionPreview dicts for non-READ_ONLY tools
 
     def _append_budget_exceeded_messages(detail: str, reason: str, remaining_calls: list[dict[str, Any]]) -> None:
         payload = _budget_exceeded_payload(
@@ -1461,6 +1473,35 @@ async def execute_tool_calls(state: AgentState) -> dict:
             newly_executed.append(requested)
             already_executed.add(requested)
 
+        # --- Action classification ---
+        from .action_registry import (
+            ActionCategory,
+            ActionPreview,
+            build_delta_preview,
+            get_action_category,
+        )
+        category = get_action_category(name)
+        if category != ActionCategory.READ_ONLY:
+            justification_citations = [
+                item.get("ref_id", "")
+                for item in state.get("tool_results", [])[-5:]
+                if isinstance(item, dict) and item.get("ref_id")
+            ]
+            preview = ActionPreview(
+                tool=name,
+                category=category,
+                args=args,
+                delta_preview=build_delta_preview(name, args),
+                justification_citations=justification_citations,
+            )
+            preview_entries.append(preview.model_dump())
+            logger.info(
+                "execute_tool_calls: non-READ_ONLY action: tool=%s category=%s preview=%r",
+                name,
+                category,
+                preview.delta_preview,
+            )
+
         handler = _TOOL_MAP.get(name)
         if handler is None:
             output = json.dumps({"error": f"Unknown tool: {name}"})
@@ -1499,6 +1540,8 @@ async def execute_tool_calls(state: AgentState) -> dict:
         "citations": citations,             # reducer *appends* to list
         "executed_skills": newly_executed,  # reducer *appends* to list
         "tool_loop_terminated_reason": terminated_reason,
+        "pending_actions": preview_entries,  # reducer *appends* non-READ_ONLY previews
+        "confirmed_tokens": [],              # reducer *appends*; tokens added by consent gate
     }
 
 

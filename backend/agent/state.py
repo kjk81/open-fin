@@ -130,3 +130,13 @@ class AgentState(TypedDict):
 
     # Structured proposal metadata emitted by memory_consent_gate.
     memory_write_proposal: dict[str, Any]
+
+    # -- Action Registry fields (Phase 4 safety schema) ----------------------
+
+    # Non-READ_ONLY action previews accumulated across tool rounds.
+    # operator.add appends lists; nodes that emit no actions return [].
+    pending_actions: Annotated[list[dict[str, Any]], operator.add]
+
+    # Confirmed action_id tokens from the UI or a future consent gate node.
+    # operator.add appends across rounds; initialized empty.
+    confirmed_tokens: Annotated[list[str], operator.add]

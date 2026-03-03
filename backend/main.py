@@ -17,7 +17,7 @@ from sqlalchemy import func, inspect, select, text
 from database import SessionLocal, engine
 from models import Base, KGNode
 from routers.portfolio import sync_alpaca_portfolio
-from routers import alerts, chat, dashboard, graph, loadouts, llm, notes, portfolio, runs, settings, ticker, trade, watchlist
+from routers import alerts, chat, dashboard, graph, loadouts, llm, memory, notes, portfolio, runs, settings, ticker, trade, watchlist
 from agent.llm import ensure_default_settings
 from migrations import run_migrations, get_current_version, set_version, CURRENT_SCHEMA_VERSION
 
@@ -296,6 +296,7 @@ app.include_router(llm.router, prefix="/api")
 app.include_router(watchlist.router, prefix="/api")
 app.include_router(graph.router, prefix="/api")
 app.include_router(notes.router, prefix="/api")
+app.include_router(memory.router, prefix="/api")
 app.include_router(loadouts.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")

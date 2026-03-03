@@ -64,6 +64,31 @@ export type TimelineItem =
   | { type: "step"; step: AgentStep; key: string }
   | { type: "tool_card"; card: ToolCardMessage; key: string };
 
+export interface VerificationWarning {
+  type: string;
+  claim_key: string;
+  source?: string;
+  sources?: string[];
+  min_value?: number;
+  max_value?: number;
+  spread_pct?: number;
+}
+
+export interface VerificationReport {
+  status: "pass" | "warning" | "critical";
+  warnings: VerificationWarning[];
+  critical: VerificationWarning[];
+}
+
+export interface ConsentProposal {
+  proposal_id: string;
+  status: string;
+  reason: string;
+  tool_result_count: number;
+  source_count: number;
+  expires_at: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -77,6 +102,8 @@ export interface ChatMessage {
   completionStatus?: AssistantCompletionStatus;
   sources?: SourceRef[];
   quickModeBlockedSearch?: boolean;
+  verificationReport?: VerificationReport;
+  consentProposal?: ConsentProposal;
 }
 
 export type AssistantCompletionStatus = "streaming" | "complete" | "incomplete";

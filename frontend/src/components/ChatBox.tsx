@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext";
 import type { AgentMode, MentionOption, TradeOrder } from "../types";
 import { ChatMessage } from "./ChatMessage";
+import { ConsentDialog } from "./ConsentDialog";
 import { MentionPopover } from "./MentionPopover";
 import { RunExplorerModal } from "./RunExplorerModal";
 import { TradeTicket } from "./TradeTicket";
@@ -58,6 +59,15 @@ export function ChatBox() {
     activeRunToolCalls,
     activeRunElapsedSeconds,
   } = state;
+
+  // Show consent dialog only after the stream settles so it doesn't interrupt typing
+  const lastAssistant = [...chatMessages].reverse().find((m) => m.role === "assistant");
+  const pendingConsent =
+    !chatStreaming &&
+    lastAssistant?.completionStatus === "complete" &&
+    lastAssistant.consentProposal
+      ? lastAssistant.consentProposal
+      : null;
 
   const [text, setText] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -280,6 +290,7 @@ export function ChatBox() {
       {exploringRunId && (
         <RunExplorerModal runId={exploringRunId} onClose={() => setExploringRunId(null)} />
       )}
+      {pendingConsent && <ConsentDialog proposal={pendingConsent} />}
     </main>
   );
 }

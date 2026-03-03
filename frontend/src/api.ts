@@ -30,6 +30,8 @@ import type {
   PaginatedTickerNotes,
   GraphConnectionsSummary,
   CapabilitiesSnapshotEvent,
+  VerificationReport,
+  ConsentProposal,
 } from "./types";
 
 // Mutable base URL — updated by initApiBase() before the React tree renders.
@@ -361,6 +363,43 @@ export async function saveSettings(values: Record<string, string | null>): Promi
   }
 }
 
+// ── Memory / Research Library ────────────────────────────────────────────────
+
+export async function confirmMemoryProposal(
+  proposalId: string,
+  decision: "confirm" | "discard",
+): Promise<{ success: boolean; proposal_id: string; status: string }> {
+  const res = await fetch(`${API}/api/memory/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proposal_id: proposalId, decision }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `Memory confirm failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function saveToResearchLibrary(payload: {
+  run_id: string;
+  category: string;
+  content: string;
+  sources: { url: string; title: string }[];
+  tags: string[];
+}): Promise<{ id: number; created_at: string }> {
+  const res = await fetch(`${API}/api/memory/save-to-library`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `Save to library failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── Agent runs ──────────────────────────────────────────────────────────────
 
 export async function fetchRun(runId: string): Promise<AgentRunSummary> {
@@ -394,6 +433,8 @@ export async function streamChat(
   onProgressEvent?: (event: import("./types").AgentProgressEvent) => void,
   agentMode?: AgentMode,
   onCapabilities?: (event: CapabilitiesSnapshotEvent) => void,
+  onVerificationReport?: (report: VerificationReport) => void,
+  onConsentRequired?: (proposal: ConsentProposal) => void,
 ): Promise<void> {
   let res: Response;
   try {
@@ -522,6 +563,10 @@ export async function streamChat(
               ? event.capabilities
               : {},
         });
+      } else if (event.type === "verification_report" && onVerificationReport) {
+        onVerificationReport(event.report as VerificationReport);
+      } else if (event.type === "consent_required" && onConsentRequired) {
+        onConsentRequired(event.proposal as ConsentProposal);
       } else if ((event.type === "step" || event.type === "status") && onProgressEvent) {
         const rawState = event.state;
         const state =

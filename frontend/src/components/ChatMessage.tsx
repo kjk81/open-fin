@@ -3,6 +3,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useAppContext } from "../context/AppContext";
 import { ToolCard } from "./ToolCard";
+import { VerificationBadge } from "./VerificationBadge";
+import { SaveToLibraryButton } from "./SaveToLibraryButton";
 import type {
   AgentStep,
   ChatMessage as ChatMessageType,
@@ -172,14 +174,20 @@ export function ChatMessage({
         {isAssistant && message.completionStatus === "incomplete" && (
           <div className="chat-incomplete">Response incomplete — request timed out or failed.</div>
         )}
+        {isAssistant && message.verificationReport && message.verificationReport.status !== "pass" && (
+          <VerificationBadge report={message.verificationReport} />
+        )}
         {isAssistant && message.sources && message.sources.length > 0 && (
           <CitationFooter sources={message.sources} />
         )}
-        {isAssistant && message.runId && (
+        {isAssistant && (message.runId || message.completionStatus === "complete") && (
           <div className="chat-run-link-row">
-            <button className="btn-ghost chat-run-link" onClick={() => onOpenRunExplorer?.(message.runId!)}>
-              Run Explorer
-            </button>
+            {message.runId && (
+              <button className="btn-ghost chat-run-link" onClick={() => onOpenRunExplorer?.(message.runId!)}>
+                Run Explorer
+              </button>
+            )}
+            <SaveToLibraryButton message={message} />
           </div>
         )}
         {isAssistant && message.quickModeBlockedSearch && retryPrompt && (

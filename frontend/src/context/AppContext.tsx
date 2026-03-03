@@ -15,6 +15,7 @@ import type {
   AnalysisSectionName,
   BackendStatus,
   ChatMessage,
+  ConsentProposal,
   PortfolioPosition,
   SourceRef,
   TerminalLogEntry,
@@ -26,6 +27,7 @@ import type {
   ToolResultEnvelope,
   ToolEvent,
   SystemStatusSnapshot,
+  VerificationReport,
   WatchlistItem,
 } from "../types";
 import {
@@ -149,7 +151,10 @@ type Action =
   | { type: "TOGGLE_TERMINAL" }
   | { type: "CLEAR_TERMINAL_LOGS" }
   | { type: "KG_UPDATED"; ticker?: string }
-  | { type: "SET_DEBUG_MODE"; enabled: boolean };
+  | { type: "SET_DEBUG_MODE"; enabled: boolean }
+  | { type: "SET_LAST_VERIFICATION_REPORT"; report: VerificationReport }
+  | { type: "SET_LAST_CONSENT_PROPOSAL"; proposal: ConsentProposal }
+  | { type: "CLEAR_LAST_CONSENT_PROPOSAL" };
 
 function toToolCardId(card: Pick<ToolCardMessage, "seq" | "tool" | "stepId">): string {
   if (Number.isFinite(card.seq) && card.seq >= 0) {
@@ -439,6 +444,32 @@ function reducer(state: AppState, action: Action): AppState {
       msgs[msgs.length - 1] = { ...last, sources: action.sources };
       return { ...state, chatMessages: msgs };
     }
+    case "SET_LAST_VERIFICATION_REPORT": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      msgs[msgs.length - 1] = { ...last, verificationReport: action.report };
+      return { ...state, chatMessages: msgs };
+    }
+    case "SET_LAST_CONSENT_PROPOSAL": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      msgs[msgs.length - 1] = { ...last, consentProposal: action.proposal };
+      return { ...state, chatMessages: msgs };
+    }
+    case "CLEAR_LAST_CONSENT_PROPOSAL": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      const { consentProposal: _removed, ...rest } = last;
+      void _removed;
+      msgs[msgs.length - 1] = rest as ChatMessage;
+      return { ...state, chatMessages: msgs };
+    }
     case "SET_TICKER_ANALYSIS_LOADING":
       return { ...state, tickerAnalysis: { ...state.tickerAnalysis, loading: action.loading } };
     case "SET_TICKER_ANALYSIS_SECTION": {
@@ -524,6 +555,7 @@ interface AppContextValue {
   clearTerminalLogs: () => void;
   setDebugMode: (enabled: boolean) => void;
   setAgentMode: (mode: AgentMode) => void;
+  clearConsentProposal: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -780,6 +812,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_AGENT_MODE", mode });
   }, []);
 
+  const clearConsentProposal = useCallback(() => {
+    dispatch({ type: "CLEAR_LAST_CONSENT_PROPOSAL" });
+  }, []);
+
   const sendMessage = useCallback((text: string, contextRefs: string[], agentMode?: AgentMode) => {
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -975,11 +1011,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
         termLog("status", "info", summary, capEvent.phase ? `phase=${capEvent.phase}` : undefined);
       },
+      (report) => {
+        dispatch({ type: "SET_LAST_VERIFICATION_REPORT", report });
+        const issues = report.critical.length + report.warnings.length;
+        termLog("status", "warn", `Verification: ${report.status} (${issues} issue(s))`);
+      },
+      (proposal) => {
+        dispatch({ type: "SET_LAST_CONSENT_PROPOSAL", proposal });
+        termLog("status", "warn", `Memory consent required: ${proposal.tool_result_count} result(s), ${proposal.source_count} source(s)`);
+      },
     );
   }, [termLog, state.debugMode, state.agentMode]);
 
   return (
-    <AppContext.Provider value={{ state, selectTicker, navigateToDashboard, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage, toggleTerminal, clearTerminalLogs, setDebugMode, setAgentMode }}>
+    <AppContext.Provider value={{ state, selectTicker, navigateToDashboard, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage, toggleTerminal, clearTerminalLogs, setDebugMode, setAgentMode, clearConsentProposal }}>
       {children}
     </AppContext.Provider>
   );

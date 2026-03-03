@@ -111,6 +111,7 @@ function makeContext(overrides: Partial<ReturnType<typeof AppContextModule.useAp
     navigateToDashboard: vi.fn(),
     setDebugMode: vi.fn(),
     setAgentMode: vi.fn(),
+    clearConsentProposal: vi.fn(),
   };
 }
 
