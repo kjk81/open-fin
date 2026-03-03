@@ -1562,6 +1562,7 @@ async def execute_tool_calls(state: AgentState) -> dict:
                     tool_name=name,
                     args=args,
                     result=output,
+                    tool_call_id=call_id,
                     confirmation_token=confirmation_token,
                     rollback_hint=build_rollback_hint(name, args),
                 )
@@ -1605,6 +1606,7 @@ def _log_state_write(
     tool_name: str,
     args: dict[str, Any],
     result: str,
+    tool_call_id: str,
     confirmation_token: str,
     rollback_hint: str,
 ) -> None:
@@ -1630,6 +1632,11 @@ def _log_state_write(
             "delta": build_delta_preview(tool_name, args),
             "confirmation_token": confirmation_token,
             "rollback_hint": rollback_hint,
+            "trace": {
+                "run_id": run_id,
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+            },
         }
         db = SessionLocal()
         try:

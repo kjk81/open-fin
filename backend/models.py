@@ -218,7 +218,12 @@ class AgentRun(Base):
 
 
 class AgentRunEvent(Base):
-    """Individual lifecycle event within an AgentRun."""
+    """Individual lifecycle event within an AgentRun.
+
+    ``payload_json`` contains event-specific fields plus ``trace`` metadata
+    (for example ``run_id``, ``node_id``, and ``tool_call_id``) used to
+    correlate chain/tool lifecycle events.
+    """
 
     __tablename__ = "agent_run_events"
 

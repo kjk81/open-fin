@@ -249,10 +249,11 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     # Accumulators filled during streaming
     accumulated_tool_results: list[dict] = []
     accumulated_sources: list[dict] = []
-    tool_start_times: dict[str, float] = {}
-    tool_args_cache: dict[str, dict] = {}   # name -> args from on_tool_start
+    node_invocations_by_key: dict[str, dict[str, str]] = {}
+    node_invocation_order: dict[str, list[str]] = defaultdict(list)
+    tool_invocations_by_key: dict[str, dict[str, Any]] = {}
+    tool_invocation_order: dict[str, list[str]] = defaultdict(list)
     event_seq = 0
-    tool_step_ids: dict[str, list[str]] = defaultdict(list)
     stage_step_ids: dict[str, str] = {}
     in_think_block = False
     think_buffer = ""
@@ -265,6 +266,91 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
 
     def tool_human_label(tool_name: str) -> str:
         return tool_name.replace("_", " ")
+
+    def _normalize_trace_id(value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    def _event_run_key(raw_event: dict[str, Any]) -> str | None:
+        candidates: list[Any] = [
+            raw_event.get("run_id"),
+            raw_event.get("id"),
+        ]
+        metadata = raw_event.get("metadata")
+        if isinstance(metadata, dict):
+            candidates.extend([
+                metadata.get("run_id"),
+                metadata.get("id"),
+                metadata.get("langgraph_run_id"),
+            ])
+        parent_ids = raw_event.get("parent_ids")
+        if isinstance(parent_ids, list) and parent_ids:
+            candidates.append(parent_ids[-1])
+        for candidate in candidates:
+            normalized = _normalize_trace_id(candidate)
+            if normalized:
+                return normalized
+        return None
+
+    def _event_tool_call_id(raw_event: dict[str, Any], raw_data: dict[str, Any]) -> str | None:
+        metadata = raw_event.get("metadata")
+        inputs = raw_data.get("input") if isinstance(raw_data.get("input"), dict) else {}
+        candidates: list[Any] = [
+            raw_event.get("tool_call_id"),
+            raw_data.get("tool_call_id"),
+            raw_data.get("call_id"),
+            inputs.get("tool_call_id"),
+            inputs.get("call_id"),
+        ]
+        if isinstance(metadata, dict):
+            candidates.extend([
+                metadata.get("tool_call_id"),
+                metadata.get("call_id"),
+                metadata.get("id"),
+            ])
+        for candidate in candidates:
+            normalized = _normalize_trace_id(candidate)
+            if normalized:
+                return normalized
+        return None
+
+    def _with_trace(
+        payload: dict[str, Any],
+        *,
+        node_id: str | None = None,
+        node_name: str | None = None,
+        tool_call_id: str | None = None,
+        tool_name: str | None = None,
+    ) -> dict[str, Any]:
+        trace: dict[str, Any] = {"run_id": run_id}
+        if node_id:
+            trace["node_id"] = node_id
+        if node_name:
+            trace["node_name"] = node_name
+        if tool_call_id:
+            trace["tool_call_id"] = tool_call_id
+        if tool_name:
+            trace["tool_name"] = tool_name
+        return {**payload, "trace": trace}
+
+    def _pop_invocation_record(
+        *,
+        bucket: dict[str, dict[str, Any]],
+        order: dict[str, list[str]],
+        name: str,
+        run_key: str | None,
+    ) -> dict[str, Any] | None:
+        if run_key and run_key in bucket:
+            record = bucket.pop(run_key)
+            if run_key in order.get(name, []):
+                order[name].remove(run_key)
+            return record
+        while order.get(name):
+            queued_key = order[name].pop(0)
+            record = bucket.pop(queued_key, None)
+            if record is not None:
+                return record
+        return None
 
     def extract_visible_content(*, flush: bool = False) -> str:
         nonlocal in_think_block, think_buffer
@@ -336,6 +422,14 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                         if residual:
                             yield emit({"type": "token", "content": residual})
 
+                        node_run_key = _event_run_key(event) or f"chain-{name}-{uuid.uuid4()}"
+                        node_id = str(uuid.uuid4())
+                        node_invocations_by_key[node_run_key] = {
+                            "node_id": node_id,
+                            "node_name": name,
+                        }
+                        node_invocation_order[name].append(node_run_key)
+
                         step_id = f"stage-{name}-{event_seq + 1}"
                         stage_step_ids[name] = step_id
                         yield emit({
@@ -346,7 +440,12 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                             "message": stage_message,
                             "verbose": True,
                         })
-                        _fire_event(run_id, event_seq, "chain_start", {"phase": name})
+                        _fire_event(
+                            run_id,
+                            event_seq,
+                            "chain_start",
+                            _with_trace({"phase": name}, node_id=node_id, node_name=name),
+                        )
 
                 elif evt == "on_chain_end":
                     # Fallback: capture tool_results from any node's on_chain_end
@@ -473,6 +572,15 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                         if residual:
                             yield emit({"type": "token", "content": residual})
 
+                        node_run_key = _event_run_key(event)
+                        node_record = _pop_invocation_record(
+                            bucket=node_invocations_by_key,
+                            order=node_invocation_order,
+                            name=name,
+                            run_key=node_run_key,
+                        )
+                        node_id = str(node_record.get("node_id")) if node_record else str(uuid.uuid4())
+
                         step_id = stage_step_ids.pop(name, f"stage-{name}-{event_seq + 1}")
                         yield emit({
                             "type": "status",
@@ -482,20 +590,32 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                             "message": stage_message,
                             "verbose": True,
                         })
-                        _fire_event(run_id, event_seq, "chain_end", {"phase": name})
+                        _fire_event(
+                            run_id,
+                            event_seq,
+                            "chain_end",
+                            _with_trace({"phase": name}, node_id=node_id, node_name=name),
+                        )
 
                 elif evt == "on_tool_start":
                     residual = extract_visible_content(flush=True)
                     if residual:
                         yield emit({"type": "token", "content": residual})
 
-                    tool_start_times[name] = time.monotonic()
                     raw_input = data.get("input") or {}
-                    tool_args_cache[name] = raw_input
                     # Keep args summary concise for the frontend chip
                     args_preview = {k: v for k, v in list(raw_input.items())[:3]}
                     step_id = f"tool-{name}-{event_seq + 1}"
-                    tool_step_ids[name].append(step_id)
+                    tool_run_key = _event_run_key(event) or f"tool-{name}-{uuid.uuid4()}"
+                    tool_call_id = _event_tool_call_id(event, data) or str(uuid.uuid4())
+                    tool_invocations_by_key[tool_run_key] = {
+                        "tool": name,
+                        "args": raw_input,
+                        "started": time.monotonic(),
+                        "step_id": step_id,
+                        "tool_call_id": tool_call_id,
+                    }
+                    tool_invocation_order[name].append(tool_run_key)
 
                     yield emit({
                         "type": "step",
@@ -509,28 +629,58 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                         "type": "tool_start",
                         "tool": name,
                         "step_id": step_id,
+                        "tool_call_id": tool_call_id,
                         "args": args_preview,
                     })
-                    _fire_event(run_id, event_seq, "tool_start", {
-                        "tool": name,
-                        "step_id": step_id,
-                        "args_preview": {k: str(v)[:100] for k, v in list(raw_input.items())[:3]},
-                    })
+                    _fire_event(
+                        run_id,
+                        event_seq,
+                        "tool_start",
+                        _with_trace(
+                            {
+                                "tool": name,
+                                "step_id": step_id,
+                                "args_preview": {k: str(v)[:100] for k, v in list(raw_input.items())[:3]},
+                            },
+                            tool_call_id=tool_call_id,
+                            tool_name=name,
+                        ),
+                    )
 
                 elif evt == "on_tool_end":
                     residual = extract_visible_content(flush=True)
                     if residual:
                         yield emit({"type": "token", "content": residual})
 
-                    started = tool_start_times.pop(name, time.monotonic())
+                    tool_run_key = _event_run_key(event)
+                    tool_record = _pop_invocation_record(
+                        bucket=tool_invocations_by_key,
+                        order=tool_invocation_order,
+                        name=name,
+                        run_key=tool_run_key,
+                    )
+                    started = (
+                        float(tool_record.get("started"))
+                        if isinstance(tool_record, dict) and tool_record.get("started") is not None
+                        else time.monotonic()
+                    )
                     duration_ms = int((time.monotonic() - started) * 1000)
                     success = True
                     parsed_result: dict[str, Any] | None = None
-                    tool_args = tool_args_cache.pop(name, None) or data.get("input") or {}
+                    tool_args = (
+                        tool_record.get("args")
+                        if isinstance(tool_record, dict) and isinstance(tool_record.get("args"), dict)
+                        else data.get("input") or {}
+                    )
                     step_id = (
-                        tool_step_ids[name].pop(0)
-                        if tool_step_ids.get(name)
+                        str(tool_record.get("step_id"))
+                        if isinstance(tool_record, dict) and tool_record.get("step_id")
                         else f"tool-{name}-{event_seq + 1}"
+                    )
+                    tool_call_id = (
+                        str(tool_record.get("tool_call_id"))
+                        if isinstance(tool_record, dict) and tool_record.get("tool_call_id")
+                        else _event_tool_call_id(event, data) or str(uuid.uuid4())
                     )
 
                     # --- Robust output extraction (RC1 fix) ---
@@ -594,18 +744,28 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                         "type": "tool_end",
                         "tool": name,
                         "step_id": step_id,
+                        "tool_call_id": tool_call_id,
                         "duration_ms": duration_ms,
                         "success": success,
                         "result_envelope": parsed_result,
                     })
-                    _fire_event(run_id, event_seq, "tool_end", {
-                        "tool": name,
-                        "step_id": step_id,
-                        "args_preview": {k: str(v)[:100] for k, v in list(tool_args.items())[:3]},
-                        "duration_ms": duration_ms,
-                        "success": success,
-                        "result_envelope": parsed_result,
-                    })
+                    _fire_event(
+                        run_id,
+                        event_seq,
+                        "tool_end",
+                        _with_trace(
+                            {
+                                "tool": name,
+                                "step_id": step_id,
+                                "args_preview": {k: str(v)[:100] for k, v in list(tool_args.items())[:3]},
+                                "duration_ms": duration_ms,
+                                "success": success,
+                                "result_envelope": parsed_result,
+                            },
+                            tool_call_id=tool_call_id,
+                            tool_name=name,
+                        ),
+                    )
 
                 elif evt == "on_chat_model_stream":
                     chunk = data.get("chunk")
