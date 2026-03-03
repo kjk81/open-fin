@@ -23,7 +23,9 @@ Topology
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -61,6 +63,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MAX_TOOL_ROUNDS = 5
+_MAX_ARTIFACT_CHARS = 4_500
+_NUMERIC_RE = re.compile(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?%?")
+_REF_RE = re.compile(r"\[REF-(\d+)\]")
 
 GRAPH_STAGE_LABELS: dict[str, tuple[str, str]] = {
     "route_finance_query": ("Planning required data fetches", "Planned data fetches"),
@@ -85,6 +90,162 @@ _FINANCE_INTENTS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 # Envelope helper
 # ---------------------------------------------------------------------------
+
+
+def _truncate_text(text: str, max_len: int = _MAX_ARTIFACT_CHARS) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "\n...[truncated]"
+
+
+def _extract_sources_from_result(result_text: str) -> list[dict[str, str]]:
+    """Extract normalized source refs from a tool output JSON string."""
+    if not result_text:
+        return []
+    try:
+        parsed = json.loads(result_text)
+    except Exception:
+        return []
+
+    if not isinstance(parsed, dict):
+        return []
+
+    out: list[dict[str, str]] = []
+    for src in parsed.get("sources") or []:
+        if not isinstance(src, dict):
+            continue
+        url = str(src.get("url") or "").strip()
+        title = str(src.get("title") or "").strip()
+        if not url and not title:
+            continue
+        out.append({"url": url, "title": title or url})
+    return out
+
+
+def _extract_numeric_tokens(text: str) -> set[str]:
+    """Return normalized numeric tokens (e.g. 1,234 -> 1234)."""
+    normalized: set[str] = set()
+    sanitized = _REF_RE.sub("", text or "")
+    for match in _NUMERIC_RE.findall(sanitized):
+        normalized.add(match.replace(",", "").strip())
+    return normalized
+
+
+def _build_artifact_registry(
+    tool_results: list[dict],
+    citations: list[dict],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Normalize tool artifacts and assign deterministic REF IDs per response."""
+    normalized: list[dict[str, Any]] = []
+
+    for tr in tool_results:
+        if not isinstance(tr, dict):
+            continue
+        tool_name = str(tr.get("tool") or "unknown_tool")
+        args = tr.get("args") or {}
+        result_text = str(tr.get("result") or "")
+        src = _extract_sources_from_result(result_text)
+        args_json = json.dumps(args, sort_keys=True, default=str)
+        key_basis = f"{tool_name}|{args_json}|{result_text[:300]}"
+        stable_key = hashlib.sha1(key_basis.encode("utf-8")).hexdigest()
+        normalized.append({
+            "stable_key": stable_key,
+            "tool": tool_name,
+            "args": args,
+            "result": _truncate_text(result_text),
+            "sources": src,
+        })
+
+    # If run-level citations were passed independently, preserve them as
+    # synthetic artifacts so they are also ref-addressable by the model.
+    for idx, c in enumerate(citations):
+        if not isinstance(c, dict):
+            continue
+        url = str(c.get("url") or "").strip()
+        title = str(c.get("title") or "").strip()
+        if not url and not title:
+            continue
+        key_basis = f"citation|{title}|{url}|{idx}"
+        stable_key = hashlib.sha1(key_basis.encode("utf-8")).hexdigest()
+        normalized.append({
+            "stable_key": stable_key,
+            "tool": "citation",
+            "args": {},
+            "result": json.dumps({"title": title, "url": url}),
+            "sources": [{"url": url, "title": title or url}],
+        })
+
+    normalized.sort(key=lambda item: item["stable_key"])
+
+    allowed_numbers: set[str] = set()
+    for i, item in enumerate(normalized, start=1):
+        item["ref_id"] = f"REF-{i}"
+        allowed_numbers |= _extract_numeric_tokens(item.get("result", ""))
+
+    return normalized, allowed_numbers
+
+
+def _format_artifacts_for_prompt(artifacts: list[dict[str, Any]]) -> str:
+    """Render canonical artifact blocks consumed by the synthesis node."""
+    if not artifacts:
+        return "[REF-0]\nNO_VERIFIABLE_ARTIFACTS"
+
+    blocks: list[str] = []
+    for item in artifacts:
+        lines = [
+            f"[{item['ref_id']}]",
+            f"TOOL: {item['tool']}",
+            f"ARGS: {json.dumps(item['args'], sort_keys=True, default=str)}",
+            "ARTIFACT:",
+            item["result"],
+        ]
+        if item.get("sources"):
+            src_bits = [
+                f"- {s.get('title') or s.get('url') or 'source'} ({s.get('url') or 'n/a'})"
+                for s in item["sources"]
+            ]
+            lines.extend(["SOURCES:", *src_bits])
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _enforce_numeric_verification(
+    response_text: str,
+    *,
+    allowed_ref_ids: set[str],
+    allowed_numeric_tokens: set[str],
+) -> str:
+    """Strip lines with numeric claims lacking valid REF IDs or artifacts backing."""
+    if not response_text:
+        return response_text
+
+    warning = (
+        "Cannot Verify: A numeric claim was removed because it could not be "
+        "verified against current-turn artifacts."
+    )
+    out_lines: list[str] = []
+
+    for raw_line in response_text.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            out_lines.append(raw_line)
+            continue
+
+        line_numbers = _extract_numeric_tokens(line)
+        if not line_numbers:
+            out_lines.append(raw_line)
+            continue
+
+        refs_in_line = {f"REF-{m}" for m in _REF_RE.findall(line)}
+        refs_valid = bool(refs_in_line) and refs_in_line.issubset(allowed_ref_ids)
+        numbers_valid = line_numbers.issubset(allowed_numeric_tokens)
+
+        if refs_valid and numbers_valid:
+            out_lines.append(raw_line)
+        else:
+            out_lines.append(warning)
+
+    return "\n".join(out_lines)
 
 def _wrap_envelope(
     tool_name: str,
@@ -615,6 +776,7 @@ async def execute_tool_calls(state: AgentState) -> dict:
 
     tool_messages: list[ToolMessage] = []
     tool_results: list[dict] = []
+    citations: list[dict] = []
 
     already_executed: set[str] = set(state.get("executed_skills", []))
     newly_executed: list[str] = []
@@ -652,6 +814,7 @@ async def execute_tool_calls(state: AgentState) -> dict:
 
         tool_messages.append(ToolMessage(content=output, tool_call_id=call_id))
         tool_results.append({"tool": name, "args": args, "result": output})
+        citations.extend(_extract_sources_from_result(output))
 
     logger.info(
         "execute_tool_calls: executed %d tool(s), round total → %d",
@@ -663,6 +826,7 @@ async def execute_tool_calls(state: AgentState) -> dict:
         "messages": tool_messages,
         "tool_call_count": 1,              # reducer *adds* to current count
         "tool_results": tool_results,       # reducer *appends* to list
+        "citations": citations,             # reducer *appends* to list
         "executed_skills": newly_executed,  # reducer *appends* to list
     }
 
@@ -674,17 +838,24 @@ async def execute_tool_calls(state: AgentState) -> dict:
 
 async def finalize_response(state: AgentState) -> dict:
     """Synthesise accumulated tool data into a streamed, user-facing answer
-    and persist the exchange to ``ChatHistory``.
+        and persist the exchange to ``ChatHistory``.
 
-    Always performs a fresh streaming LLM call so that the chat SSE endpoint
-    (which listens for ``on_chat_model_stream`` events) can push tokens to
-    the frontend in real time.
+        Always performs a fresh streaming LLM call so that the chat SSE endpoint
+        (which listens for ``on_chat_model_stream`` events) can push tokens to
+        the frontend in real time.
+
+        Verify gate policy:
+        - Input evidence is restricted to current ``tool_results`` + ``citations``.
+        - Each artifact is normalized and assigned deterministic ``[REF-n]`` IDs.
+        - Numeric lines in model output are stripped unless they include valid
+            ``[REF-n]`` and all numbers are present in evidence artifacts.
     """
     from database import SessionLocal
     from models import ChatHistory
 
     session_id = state.get("session_id", "")
     tool_results = state.get("tool_results", [])
+    citations = state.get("citations", [])
 
     # --- Recover the original user message ---
     current_user_text = state.get("current_query", "")
@@ -694,70 +865,39 @@ async def finalize_response(state: AgentState) -> dict:
                 current_user_text = msg.content
                 break
 
-    # --- Build the synthesis prompt with all accumulated context ---
+    artifacts, allowed_numbers = _build_artifact_registry(tool_results, citations)
+    allowed_ref_ids = {item["ref_id"] for item in artifacts}
+    artifact_block = _format_artifacts_for_prompt(artifacts)
+
+    # --- Build synthesis prompt with only query + artifacts/citations ---
     agent_mode = state.get("agent_mode", "genie")
     ctx_parts: list[str] = [get_finalize_prompt(agent_mode=agent_mode)]
+    ctx_parts.append("\n\nSTANDARDIZED_ARTIFACTS (cite as [REF-n]):\n" + artifact_block)
 
-    injected = state.get("injected_context", "")
-    if injected:
-        ctx_parts.append(f"\n\nUSER PORTFOLIO:\n{injected}")
-
-    if tool_results:
-        ctx_parts.append("\n\nRESEARCH DATA COLLECTED:")
-        for tr in tool_results:
-            result_text = tr.get("result", "")
-            if len(result_text) > 4_500:
-                result_text = result_text[:4_500] + "\n...[truncated]"
-            ctx_parts.append(
-                f"\n[{tr['tool']}({json.dumps(tr['args'], default=str)})]\n"
-                f"{result_text}"
-            )
-
-    anomaly = state.get("anomaly_context", "")
-    if anomaly:
-        ctx_parts.append(f"\n\nANOMALY ALERT CONTEXT:\n{anomaly}")
-
-    intent = state.get("intent", "")
-    if intent == "trade_recommendation":
-        ctx_parts.append(
-            '\n\nWhen recommending trades, format each as: '
-            '[TRADE: {"action": "BUY", "ticker": "AAPL", "qty": 10}]'
-        )
-
-    # --- Load recent chat history for multi-turn context ---
-    db = SessionLocal()
+    # --- Construct minimal synthesis input (no history) ---
     synthesis_messages: list[BaseMessage] = [
         SystemMessage(content="\n".join(ctx_parts)),
     ]
-    try:
-        rows = (
-            db.query(ChatHistory)
-            .filter(ChatHistory.session_id == session_id)
-            .order_by(ChatHistory.created_at.asc())
-            .limit(10)
-            .all()
-        )
-        for row in rows:
-            if row.role == "user":
-                synthesis_messages.append(HumanMessage(content=row.content))
-            elif row.role == "assistant":
-                synthesis_messages.append(AIMessage(content=row.content))
-    except Exception as exc:
-        logger.warning(
-            "finalize_response: history load failed for session %s: %s",
-            session_id, exc,
-        )
-    finally:
-        db.close()
-
     synthesis_messages.append(HumanMessage(content=current_user_text))
 
-    # --- Stream the final response (captured by SSE endpoint) ---
+    # --- Stream the final response (captured by SSE endpoint), tools-disabled ---
     llm = get_llm(role="agent")
+    if hasattr(llm, "bind_tools"):
+        try:
+            llm = llm.bind_tools([])
+        except Exception as exc:
+            logger.debug("finalize_response: bind_tools([]) unsupported: %s", exc)
+
     full_response = ""
     async for chunk in llm.astream(synthesis_messages):
         if chunk.content:
             full_response += chunk.content
+
+    full_response = _enforce_numeric_verification(
+        full_response,
+        allowed_ref_ids=allowed_ref_ids,
+        allowed_numeric_tokens=allowed_numbers,
+    )
 
     # --- Persist the exchange to ChatHistory ---
     db = SessionLocal()
@@ -848,6 +988,7 @@ async def fallback_tool_execution(state: AgentState) -> dict:
         return {"tool_call_count": 1}
 
     tool_results: list[dict] = []
+    citations: list[dict] = []
     data_parts: list[str] = []
 
     for ticker in tickers[:3]:
@@ -859,6 +1000,7 @@ async def fallback_tool_execution(state: AgentState) -> dict:
                     "args": {"symbol": ticker, "ticker": ticker},
                     "result": output,
                 })
+                citations.extend(_extract_sources_from_result(output))
                 data_parts.append(f"[{tool_fn.name}({ticker})]\n{output[:4_500]}")
                 logger.info(
                     "fallback_tool_execution: fetched %s(%s) — %d chars",
@@ -884,6 +1026,7 @@ async def fallback_tool_execution(state: AgentState) -> dict:
     return {
         "messages": messages,
         "tool_results": tool_results,
+        "citations": citations,
         "tool_call_count": 1,
     }
 

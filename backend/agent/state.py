@@ -63,6 +63,9 @@ class AgentState(TypedDict):
     # Accumulated ToolResult payloads from execute_tool_calls (operator.add concatenates)
     tool_results: Annotated[list[dict], operator.add]
 
+    # Aggregated citation refs collected during tool execution (operator.add concatenates)
+    citations: Annotated[list[dict], operator.add]
+
     # Skill names that have already been executed in this session
     executed_skills: Annotated[list[str], operator.add]
 

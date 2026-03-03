@@ -101,6 +101,19 @@ class TestFinalizePrompt:
         prompt = get_finalize_prompt()
         assert "Synthesise" in prompt or "synthesise" in prompt.lower()
 
+    def test_includes_strict_verify_directive(self) -> None:
+        from agent.prompts import get_finalize_prompt
+
+        prompt = get_finalize_prompt()
+        assert "STRICT VERIFY DIRECTIVE" in prompt
+        assert "[REF-n]" in prompt
+
+    def test_includes_cannot_verify_fallback(self) -> None:
+        from agent.prompts import get_finalize_prompt
+
+        prompt = get_finalize_prompt()
+        assert "Cannot Verify" in prompt
+
     def test_is_non_empty_string(self) -> None:
         from agent.prompts import get_finalize_prompt
 
@@ -129,6 +142,44 @@ class TestGenerationPrompt:
         prompt = get_generation_prompt()
         assert isinstance(prompt, str)
         assert len(prompt) > 200
+
+
+class TestFinalizeVerifyGateHelpers:
+    def test_enforce_numeric_verification_strips_unverifiable_numbers(self) -> None:
+        from agent.graph import _enforce_numeric_verification
+
+        out = _enforce_numeric_verification(
+            "Revenue was 999 in Q4.",
+            allowed_ref_ids={"REF-1"},
+            allowed_numeric_tokens={"100"},
+        )
+        assert "Cannot Verify" in out
+
+    def test_enforce_numeric_verification_keeps_verified_numbers(self) -> None:
+        from agent.graph import _enforce_numeric_verification
+
+        out = _enforce_numeric_verification(
+            "Revenue was 100 [REF-1] in Q4.",
+            allowed_ref_ids={"REF-1"},
+            allowed_numeric_tokens={"100"},
+        )
+        assert "Cannot Verify" not in out
+        assert "100 [REF-1]" in out
+
+    def test_artifact_registry_assigns_ref_ids(self) -> None:
+        from agent.graph import _build_artifact_registry
+
+        artifacts, _ = _build_artifact_registry(
+            tool_results=[{
+                "tool": "get_company_profile",
+                "args": {"symbol": "AAPL"},
+                "result": '{"data": {"market_cap": 100}, "sources": [{"title": "Src", "url": "https://x"}]}',
+            }],
+            citations=[],
+        )
+
+        assert len(artifacts) == 1
+        assert artifacts[0]["ref_id"] == "REF-1"
 
 
 # ---------------------------------------------------------------------------

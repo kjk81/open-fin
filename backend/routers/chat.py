@@ -199,6 +199,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "active_skills": [],
         "tool_call_count": 0,
         "tool_results": [],
+        "citations": [],
         "agent_mode": request.agent_mode,
         "run_id": run_id,
     }

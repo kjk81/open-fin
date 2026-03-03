@@ -199,9 +199,15 @@ def get_finalize_prompt(agent_mode: str = "genie") -> str:
     base_instruction = (
         "Synthesise the research data below into a clear, data-driven "
         "answer for the user.  Be concise, precise and professional.  "
-        "Cite specific numbers from the tool results.  Structure your "
-        "response with clear headings where appropriate.  Always clarify "
-        "that your responses are informational and not financial advice."
+        "STRICT VERIFY DIRECTIVE: every numeric claim MUST include at least "
+        "one artifact citation ID in the format [REF-n] that exists in the "
+        "STANDARDIZED_ARTIFACTS block.  You MUST NOT invent or infer numeric "
+        "values not present in those artifacts.  If a number cannot be traced "
+        "to an artifact, replace that statement with: 'Cannot Verify'.  "
+        "Use only the provided user query and standardized artifacts/citations "
+        "for synthesis.  Structure your response with clear headings where "
+        "appropriate.  Always clarify that your responses are informational "
+        "and not financial advice."
     )
 
     cfg = get_mode_config(agent_mode)
