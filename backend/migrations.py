@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Version constant — bump when adding a new migration below
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +142,100 @@ def _migration_5(engine: Engine) -> None:
     logger.info("Migration 5: created agent_runs and agent_run_events tables.")
 
 
+def _migration_6(engine: Engine) -> None:
+    """Add typed memory tables for long-term assistant memory."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS user_preferences ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  run_id VARCHAR(36) NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,"
+            "  category VARCHAR(100) NOT NULL,"
+            "  content_json TEXT NOT NULL DEFAULT '{}',"
+            "  citations_json TEXT NOT NULL DEFAULT '[]',"
+            "  tags_json TEXT NOT NULL DEFAULT '[]',"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  CONSTRAINT uq_user_preferences_category UNIQUE (category)"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_user_preferences_run_id "
+            "ON user_preferences (run_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_user_preferences_category "
+            "ON user_preferences (category)"
+        ))
+
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS portfolio_snapshots ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  run_id VARCHAR(36) NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,"
+            "  category VARCHAR(100) NOT NULL,"
+            "  content_json TEXT NOT NULL DEFAULT '{}',"
+            "  citations_json TEXT NOT NULL DEFAULT '[]',"
+            "  tags_json TEXT NOT NULL DEFAULT '[]',"
+            "  confidence FLOAT NOT NULL DEFAULT 0.0,"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  CONSTRAINT uq_portfolio_snapshots_run_id UNIQUE (run_id)"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_portfolio_snapshots_run_id "
+            "ON portfolio_snapshots (run_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_portfolio_snapshots_category "
+            "ON portfolio_snapshots (category)"
+        ))
+
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS episodic_summaries ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  run_id VARCHAR(36) NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,"
+            "  category VARCHAR(100) NOT NULL,"
+            "  content_json TEXT NOT NULL DEFAULT '{}',"
+            "  citations_json TEXT NOT NULL DEFAULT '[]',"
+            "  tags_json TEXT NOT NULL DEFAULT '[]',"
+            "  expires_at DATETIME,"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  CONSTRAINT uq_episodic_summaries_run_id UNIQUE (run_id)"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_episodic_summaries_run_id "
+            "ON episodic_summaries (run_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_episodic_summaries_category "
+            "ON episodic_summaries (category)"
+        ))
+
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS research_library ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  run_id VARCHAR(36) NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,"
+            "  category VARCHAR(100) NOT NULL,"
+            "  content_json TEXT NOT NULL DEFAULT '{}',"
+            "  citations_json TEXT NOT NULL DEFAULT '[]',"
+            "  tags_json TEXT NOT NULL DEFAULT '[]',"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_research_library_run_id "
+            "ON research_library (run_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_research_library_category "
+            "ON research_library (category)"
+        ))
+    logger.info("Migration 6: created typed memory tables and indexes.")
+
+
 # Ordered list — index 0 = migration 1, index N-1 = migration N
 MIGRATIONS: list[Callable[[Engine], None]] = [
     _migration_1,
@@ -149,6 +243,7 @@ MIGRATIONS: list[Callable[[Engine], None]] = [
     _migration_3,
     _migration_4,
     _migration_5,
+    _migration_6,
 ]
 
 

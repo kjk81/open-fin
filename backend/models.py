@@ -230,3 +230,82 @@ class AgentRunEvent(Base):
     type: Mapped[str] = mapped_column(String(20))  # chain_start|chain_end|tool_start|tool_end|error|done
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UserPreferences(Base):
+    """Global user preference memory upserted by category."""
+
+    __tablename__ = "user_preferences"
+    __table_args__ = (
+        UniqueConstraint("category", name="uq_user_preferences_category"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(100), index=True)
+    content_json: Mapped[str] = mapped_column(Text, default="{}")
+    citations_json: Mapped[str] = mapped_column(Text, default="[]")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PortfolioSnapshot(Base):
+    """Point-in-time portfolio context for a specific run."""
+
+    __tablename__ = "portfolio_snapshots"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_portfolio_snapshots_run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(100), index=True)
+    content_json: Mapped[str] = mapped_column(Text, default="{}")
+    citations_json: Mapped[str] = mapped_column(Text, default="[]")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class EpisodicSummary(Base):
+    """Run-bounded summary memory for past interactions."""
+
+    __tablename__ = "episodic_summaries"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_episodic_summaries_run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(100), index=True)
+    content_json: Mapped[str] = mapped_column(Text, default="{}")
+    citations_json: Mapped[str] = mapped_column(Text, default="[]")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ResearchLibrary(Base):
+    """Heavyweight, provenance-rich research artifacts linked to runs."""
+
+    __tablename__ = "research_library"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(100), index=True)
+    content_json: Mapped[str] = mapped_column(Text, default="{}")
+    citations_json: Mapped[str] = mapped_column(Text, default="[]")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
