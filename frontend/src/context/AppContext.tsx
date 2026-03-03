@@ -10,6 +10,7 @@ import {
 import type {
   AgentRunEvent,
   AgentMode,
+  AgentProgressEvent,
   AgentStep,
   AnalysisSectionName,
   BackendStatus,
@@ -24,6 +25,7 @@ import type {
   ToolCardMessage,
   ToolResultEnvelope,
   ToolEvent,
+  SystemStatusSnapshot,
   WatchlistItem,
 } from "../types";
 import {
@@ -62,6 +64,10 @@ interface AppState {
   kgLastTicker: string | null;
   debugMode: boolean;
   agentMode: AgentMode;
+  systemStatus: SystemStatusSnapshot;
+  activeRunToolCalls: number;
+  activeRunElapsedSeconds: number;
+  activeRunStartedAt: number | null;
 }
 
 const _EMPTY_ANALYSIS: TickerAnalysis = {
@@ -90,7 +96,17 @@ const initialState: AppState = {
   kgLastUpdated: 0,
   kgLastTicker: null,
   debugMode: typeof localStorage !== "undefined" && localStorage.getItem("open-fin-debug-mode") === "true",
-  agentMode: "genie",
+  agentMode: "quick",
+  systemStatus: {
+    web: "unknown",
+    core: "unknown",
+    worker: "unknown",
+    capabilities: {},
+    updatedAt: 0,
+  },
+  activeRunToolCalls: 0,
+  activeRunElapsedSeconds: 0,
+  activeRunStartedAt: null,
 };
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -123,6 +139,12 @@ type Action =
   | { type: "SET_TICKER_ANALYSIS_ERROR"; error: string | null }
   | { type: "CLEAR_TICKER_ANALYSIS" }
   | { type: "SET_AGENT_MODE"; mode: AgentMode }
+  | { type: "SET_SYSTEM_STATUS"; snapshot: SystemStatusSnapshot }
+  | { type: "START_CHAT_RUN"; startedAt: number }
+  | { type: "INCREMENT_TOOL_CALL_COUNT" }
+  | { type: "TICK_CHAT_RUN_SECONDS"; now: number }
+  | { type: "STOP_CHAT_RUN" }
+  | { type: "MARK_LAST_ASSISTANT_QUICK_BLOCKED" }
   | { type: "APPEND_TERMINAL_LOG"; entry: TerminalLogEntry }
   | { type: "TOGGLE_TERMINAL" }
   | { type: "CLEAR_TERMINAL_LOGS" }
@@ -200,6 +222,76 @@ function cardFromRunEvent(event: AgentRunEvent): ToolCardMessage | null {
     args,
     resultEnvelope: envelope,
   };
+}
+
+function toBool(value: unknown): boolean | null {
+  if (typeof value !== "boolean") return null;
+  return value;
+}
+
+function deriveSystemStatus(capabilities: Record<string, unknown>): SystemStatusSnapshot {
+  const internetOk = toBool(capabilities["internet_dns_ok"]);
+  const fmpConfigured = toBool(capabilities["fmp_api_key_present"]);
+  const secConfigured = toBool(capabilities["sec_api_key_present"]);
+  const workerReachable = toBool(capabilities["worker_reachable"]);
+  const dbReady = toBool(capabilities["db_ready"]);
+  const faissReady = toBool(capabilities["faiss_ready"]);
+
+  let web: SystemStatusSnapshot["web"] = "unknown";
+  if (internetOk === false) {
+    web = "disconnected";
+  } else if (internetOk === true && fmpConfigured === true && secConfigured === true) {
+    web = "online";
+  } else if (internetOk === true && (fmpConfigured === false || secConfigured === false)) {
+    web = "degraded";
+  }
+
+  let worker: SystemStatusSnapshot["worker"] = "unknown";
+  if (workerReachable === true) {
+    worker = "online";
+  } else if (workerReachable === false) {
+    worker = "disconnected";
+  }
+
+  let core: SystemStatusSnapshot["core"] = "unknown";
+  if (dbReady === true && faissReady === true) {
+    core = "online";
+  } else if (dbReady === false || faissReady === false) {
+    core = "degraded";
+  }
+
+  return {
+    web,
+    core,
+    worker,
+    capabilities,
+    updatedAt: Date.now(),
+  };
+}
+
+function isQuickModeSearchBlocked(event: AgentProgressEvent): boolean {
+  if (event.state !== "warning") return false;
+  if (!event.details || typeof event.details !== "object") return false;
+
+  if (event.details.quick_mode_blocked_search === true) {
+    return true;
+  }
+
+  const mode = typeof event.details.mode === "string" ? event.details.mode.toLowerCase() : "";
+  if (mode !== "quick") return false;
+
+  const disabledToolsRaw = event.details.disabled_tools;
+  const disabledTools = Array.isArray(disabledToolsRaw)
+    ? disabledToolsRaw.filter((v): v is string => typeof v === "string").map((v) => v.toLowerCase())
+    : [];
+
+  return disabledTools.some((tool) =>
+    tool === "search_web"
+    || tool === "fetch_webpage"
+    || tool === "read_filings"
+    || tool === "extract_filing_sections"
+    || tool === "get_filings_metadata"
+  );
 }
 
 function reducer(state: AppState, action: Action): AppState {
@@ -370,6 +462,36 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, tickerAnalysis: { ..._EMPTY_ANALYSIS } };
     case "SET_AGENT_MODE":
       return { ...state, agentMode: action.mode };
+    case "SET_SYSTEM_STATUS":
+      return { ...state, systemStatus: action.snapshot };
+    case "START_CHAT_RUN":
+      return {
+        ...state,
+        activeRunToolCalls: 0,
+        activeRunElapsedSeconds: 0,
+        activeRunStartedAt: action.startedAt,
+      };
+    case "INCREMENT_TOOL_CALL_COUNT":
+      return { ...state, activeRunToolCalls: state.activeRunToolCalls + 1 };
+    case "TICK_CHAT_RUN_SECONDS": {
+      if (state.activeRunStartedAt == null) return state;
+      const elapsedSeconds = Math.max(0, Math.floor((action.now - state.activeRunStartedAt) / 1000));
+      if (elapsedSeconds === state.activeRunElapsedSeconds) return state;
+      return { ...state, activeRunElapsedSeconds: elapsedSeconds };
+    }
+    case "STOP_CHAT_RUN":
+      return {
+        ...state,
+        activeRunStartedAt: null,
+      };
+    case "MARK_LAST_ASSISTANT_QUICK_BLOCKED": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      msgs[msgs.length - 1] = { ...last, quickModeBlockedSearch: true };
+      return { ...state, chatMessages: msgs };
+    }
     case "APPEND_TERMINAL_LOG": {
       const logs = [...state.terminalLogs, action.entry];
       return { ...state, terminalLogs: logs.length > 500 ? logs.slice(logs.length - 500) : logs };
@@ -484,6 +606,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
       clearInterval(interval);
     };
   }, [state.backendStatus]);
+
+  useEffect(() => {
+    if (!state.chatStreaming || state.activeRunStartedAt == null) return;
+    dispatch({ type: "TICK_CHAT_RUN_SECONDS", now: Date.now() });
+    const interval = setInterval(() => {
+      dispatch({ type: "TICK_CHAT_RUN_SECONDS", now: Date.now() });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [state.chatStreaming, state.activeRunStartedAt]);
 
   const reloadPortfolio = useCallback(async () => {
     try {
@@ -688,6 +819,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "ADD_CHAT_MESSAGE", message: userMsg });
     dispatch({ type: "ADD_CHAT_MESSAGE", message: assistantMsg });
     dispatch({ type: "SET_CHAT_STREAMING", streaming: true });
+    dispatch({ type: "START_CHAT_RUN", startedAt: Date.now() });
 
     const preview = text.length > 60 ? text.slice(0, 57) + "..." : text;
     termLog("system", "info", `Pipeline initiated → "${preview}"`);
@@ -721,6 +853,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             });
         }
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
+        dispatch({ type: "STOP_CHAT_RUN" });
         dispatch({ type: "SET_LAST_ASSISTANT_STATUS", status: "complete" });
         dispatch({ type: "FINALIZE_RUNNING_STEPS" });
         termLog("done", "success", "Pipeline complete.");
@@ -728,6 +861,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       (err, detail) => {
         const displayMsg = state.debugMode && detail ? detail : err;
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
+        dispatch({ type: "STOP_CHAT_RUN" });
         dispatch({ type: "SET_LAST_ASSISTANT_STATUS", status: "incomplete" });
         termLog("error", "error", displayMsg, detail);
       },
@@ -739,6 +873,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           dispatch({ type: "UPSERT_TOOL_CARD", card: toolCard });
         }
         if (toolEvent.status === "running") {
+          dispatch({ type: "INCREMENT_TOOL_CALL_COUNT" });
           const argEntries = toolEvent.args ? Object.entries(toolEvent.args) : [];
           const argsPreview = (state.debugMode ? argEntries : argEntries.slice(0, 2))
             .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
@@ -772,6 +907,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const level: TerminalLogLevel =
           progressEvent.state === "error"
             ? "error"
+            : progressEvent.state === "warning"
+              ? "warn"
             : progressEvent.state === "done"
               ? "success"
               : "info";
@@ -797,6 +934,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           },
         });
 
+        if (isQuickModeSearchBlocked(progressEvent)) {
+          dispatch({ type: "MARK_LAST_ASSISTANT_QUICK_BLOCKED" });
+        }
+
         const detail = progressEvent.phase ? `phase=${progressEvent.phase}` : undefined;
         termLog(
           progressEvent.eventType === "step" ? "step" : "status",
@@ -808,6 +949,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       agentMode ?? state.agentMode,
       (capEvent) => {
         const c = capEvent.capabilities ?? {};
+        const statusSnapshot = deriveSystemStatus(c);
+        dispatch({ type: "SET_SYSTEM_STATUS", snapshot: statusSnapshot });
         const internetOk = c["internet_dns_ok"] === true;
         const fmpOk = c["fmp_api_key_present"] === true;
         const secOk = c["sec_api_key_present"] === true;

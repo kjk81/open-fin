@@ -76,11 +76,12 @@ export interface ChatMessage {
   timeline?: TimelineItem[];
   completionStatus?: AssistantCompletionStatus;
   sources?: SourceRef[];
+  quickModeBlockedSearch?: boolean;
 }
 
 export type AssistantCompletionStatus = "streaming" | "complete" | "incomplete";
 
-export type AgentStepState = "running" | "done" | "error";
+export type AgentStepState = "running" | "done" | "warning" | "error";
 
 export interface AgentStep {
   seq: number;
@@ -104,6 +105,7 @@ export interface AgentProgressEvent {
   durationMs?: number;
   phase?: string;
   verbose?: boolean;
+  details?: Record<string, unknown>;
 }
 
 export interface CapabilitiesSnapshotEvent {
@@ -111,6 +113,16 @@ export interface CapabilitiesSnapshotEvent {
   runId?: string;
   phase?: string;
   capabilities: Record<string, unknown>;
+}
+
+export type SystemStatusLevel = "online" | "degraded" | "disconnected" | "unknown";
+
+export interface SystemStatusSnapshot {
+  web: SystemStatusLevel;
+  core: SystemStatusLevel;
+  worker: SystemStatusLevel;
+  capabilities: Record<string, unknown>;
+  updatedAt: number;
 }
 
 export interface ToolProvenance {
@@ -401,7 +413,7 @@ export type SettingsValues = Record<string, SettingValue>;
 
 // ── Agent Modes + Analysis ──────────────────────────────────────────────────
 
-export type AgentMode = "genie" | "fundamentals" | "sentiment" | "technical";
+export type AgentMode = "quick" | "research" | "portfolio" | "strategy";
 
 export type AnalysisSectionName = "fundamentals" | "sentiment" | "technical";
 

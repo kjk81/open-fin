@@ -20,9 +20,18 @@ interface Props {
   isStreaming: boolean;
   onReviewTrade: (trade: TradeOrder) => void;
   onOpenRunExplorer?: (runId: string) => void;
+  onRunInResearchMode?: (prompt: string) => void;
+  retryPrompt?: string;
 }
 
-export function ChatMessage({ message, isStreaming, onReviewTrade, onOpenRunExplorer }: Props) {
+export function ChatMessage({
+  message,
+  isStreaming,
+  onReviewTrade,
+  onOpenRunExplorer,
+  onRunInResearchMode,
+  retryPrompt,
+}: Props) {
   const { selectTicker } = useAppContext();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -173,6 +182,16 @@ export function ChatMessage({ message, isStreaming, onReviewTrade, onOpenRunExpl
             </button>
           </div>
         )}
+        {isAssistant && message.quickModeBlockedSearch && retryPrompt && (
+          <div className="chat-run-link-row">
+            <button
+              className="btn-ghost chat-run-link"
+              onClick={() => onRunInResearchMode?.(retryPrompt)}
+            >
+              Run again in Research Mode
+            </button>
+          </div>
+        )}
       </div>
       <div className="chat-meta">
         {isUser ? "You" : isSystem ? "System" : "Finneas"}
@@ -221,10 +240,13 @@ function CitationFooter({ sources }: { sources: SourceRef[] }) {
 function StepRow({ step }: { step: AgentStep }) {
   const isDone = step.state === "done";
   const isRunning = step.state === "running";
+  const isWarning = step.state === "warning";
 
   // Inline icon: ✓ done, ✕ error, spinner for running
   const indicatorClass = isRunning
     ? "chat-step-indicator chat-step-indicator--running"
+    : isWarning
+      ? "chat-step-indicator chat-step-indicator--warning"
     : isDone
       ? "chat-step-indicator chat-step-indicator--done"
       : "chat-step-indicator chat-step-indicator--error";

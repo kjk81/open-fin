@@ -7,11 +7,18 @@ import { RunExplorerModal } from "./RunExplorerModal";
 import { TradeTicket } from "./TradeTicket";
 
 const AGENT_MODES: { value: AgentMode; label: string }[] = [
-  { value: "genie", label: "Genie" },
-  { value: "fundamentals", label: "Fundamentals" },
-  { value: "sentiment", label: "Sentiment" },
-  { value: "technical", label: "Technical" },
+  { value: "quick", label: "Quick" },
+  { value: "research", label: "Research" },
+  { value: "portfolio", label: "Portfolio" },
+  { value: "strategy", label: "Strategy" },
 ];
+
+function statusLabel(value: "online" | "degraded" | "disconnected" | "unknown"): string {
+  if (value === "online") return "Online";
+  if (value === "degraded") return "Degraded";
+  if (value === "disconnected") return "Disconnected";
+  return "Unknown";
+}
 
 // Parse @mentions from text and return context_refs array
 function extractContextRefs(text: string): string[] {
@@ -42,7 +49,15 @@ function getMentionQuery(value: string, cursorPos: number): string | null {
 
 export function ChatBox() {
   const { state, sendMessage, selectTicker, reloadPortfolio, addSystemMessage, setAgentMode } = useAppContext();
-  const { chatMessages, chatStreaming, portfolio, agentMode } = state;
+  const {
+    chatMessages,
+    chatStreaming,
+    portfolio,
+    agentMode,
+    systemStatus,
+    activeRunToolCalls,
+    activeRunElapsedSeconds,
+  } = state;
 
   const [text, setText] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -150,8 +165,29 @@ export function ChatBox() {
     });
   };
 
+  const handleRunInResearchMode = (prompt: string) => {
+    const trimmed = prompt.trim();
+    if (!trimmed || chatStreaming) return;
+    const contextRefs = extractContextRefs(trimmed);
+    sendMessage(trimmed, contextRefs, "research");
+    setAgentMode("research");
+  };
+
   return (
     <main className="pane-chat">
+      <div className="chat-system-status" aria-live="polite">
+        <span>System Status</span>
+        <span className={`status-pill status-pill--${systemStatus.web}`}>Web: {statusLabel(systemStatus.web)}</span>
+        <span className={`status-pill status-pill--${systemStatus.core}`}>Core: {statusLabel(systemStatus.core)}</span>
+        <span className={`status-pill status-pill--${systemStatus.worker}`}>Worker: {statusLabel(systemStatus.worker)}</span>
+      </div>
+      {chatStreaming && (
+        <div className="chat-run-progress" aria-live="polite">
+          <span>Tool Calls: {activeRunToolCalls}</span>
+          <span>Seconds Elapsed: {activeRunElapsedSeconds}</span>
+        </div>
+      )}
+
       {/* Message list */}
       <div className="chat-messages">
         {chatMessages.length === 0 && (
@@ -163,15 +199,30 @@ export function ChatBox() {
             </p>
           </div>
         )}
-        {chatMessages.map((msg, idx) => (
-          <ChatMessage
-            key={msg.id}
-            message={msg}
-            isStreaming={chatStreaming && idx === chatMessages.length - 1}
-            onReviewTrade={setTradeToReview}
-            onOpenRunExplorer={setExploringRunId}
-          />
-        ))}
+        {chatMessages.map((msg, idx) => {
+          const retryPrompt = msg.role === "assistant"
+            ? (() => {
+                for (let i = idx - 1; i >= 0; i -= 1) {
+                  if (chatMessages[i]?.role === "user") {
+                    return chatMessages[i].content;
+                  }
+                }
+                return undefined;
+              })()
+            : undefined;
+
+          return (
+            <ChatMessage
+              key={msg.id}
+              message={msg}
+              isStreaming={chatStreaming && idx === chatMessages.length - 1}
+              onReviewTrade={setTradeToReview}
+              onOpenRunExplorer={setExploringRunId}
+              onRunInResearchMode={handleRunInResearchMode}
+              retryPrompt={retryPrompt}
+            />
+          );
+        })}
         <div ref={messagesEndRef} />
       </div>
 

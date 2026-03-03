@@ -404,7 +404,7 @@ export async function streamChat(
         message,
         session_id: sessionId,
         context_refs: contextRefs,
-        agent_mode: agentMode ?? "genie",
+        agent_mode: agentMode ?? "quick",
       }),
       signal,
     });
@@ -525,7 +525,7 @@ export async function streamChat(
       } else if ((event.type === "step" || event.type === "status") && onProgressEvent) {
         const rawState = event.state;
         const state =
-          rawState === "done" || rawState === "error" || rawState === "running"
+          rawState === "done" || rawState === "error" || rawState === "running" || rawState === "warning"
             ? rawState
             : "running";
         onProgressEvent({
@@ -540,6 +540,7 @@ export async function streamChat(
           durationMs: typeof event.duration_ms === "number" ? event.duration_ms : undefined,
           phase: typeof event.phase === "string" ? event.phase : undefined,
           verbose: Boolean(event.verbose),
+          details: event.details && typeof event.details === "object" ? event.details : undefined,
         });
       }
     } catch {

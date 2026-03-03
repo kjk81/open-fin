@@ -169,6 +169,17 @@ def _sse(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
+def _is_quick_mode_search_blocked(event: dict[str, Any]) -> bool:
+    mode = str(event.get("mode") or "").strip().lower()
+    if mode != "quick":
+        return False
+    disabled = event.get("disabled_tools")
+    if not isinstance(disabled, list):
+        return False
+    lowered = {str(tool).strip().lower() for tool in disabled}
+    return bool({"search_web", "fetch_webpage", "read_filings", "extract_filing_sections", "get_filings_metadata"} & lowered)
+
+
 async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     """
     Run the LangGraph workflow and yield SSE-formatted strings.
@@ -353,6 +364,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                                 if not isinstance(event, dict):
                                     continue
                                 message = str(event.get("message") or "Capability limitation detected")
+                                quick_mode_blocked = _is_quick_mode_search_blocked(event)
                                 yield emit({
                                     "type": "status",
                                     "state": "warning",
@@ -360,11 +372,13 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                                     "message": message,
                                     "verbose": True,
                                     "run_id": run_id,
+                                    "quick_mode_blocked_search": quick_mode_blocked,
                                     "details": {
                                         "mode": event.get("mode"),
                                         "disabled_tools": event.get("disabled_tools", []),
                                         "reasons": event.get("reasons", []),
                                         "suggestions": event.get("suggestions", []),
+                                        "quick_mode_blocked_search": quick_mode_blocked,
                                     },
                                 })
 
