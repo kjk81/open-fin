@@ -37,6 +37,17 @@ from langchain_core.messages import (
 from langchain_core.tools import tool as langchain_tool
 from langgraph.graph import StateGraph, START, END
 
+from schemas.tool_contracts import (
+    Provenance,
+    Quality,
+    RawRef,
+    ToolResult,
+    ToolResultEnvelope,
+    ToolTiming,
+    compute_completeness,
+    to_envelope,
+)
+
 from .llm import get_llm, load_llm_settings, _effective_order_for_role, _provider_model
 from .nodes import intent_router, context_injector, generation_node
 from .prompts import get_finalize_prompt, get_router_soul_prompt
@@ -72,10 +83,42 @@ _FINANCE_INTENTS: frozenset[str] = frozenset({
 # and embed the Finneas SOUL personality on every call.
 
 # ---------------------------------------------------------------------------
+# Envelope helper
+# ---------------------------------------------------------------------------
+
+def _wrap_envelope(
+    tool_name: str,
+    result: "ToolResult[Any]",
+    identifier: str,
+    **kwargs: Any,
+) -> str:
+    """Convert a ToolResult → ToolResultEnvelope and serialize to JSON.
+
+    Computes tool-specific completeness heuristics and forwards any extra
+    kwargs (e.g. ``raw_ref``) to :func:`to_envelope`.
+    """
+    raw_data = result.data
+    if hasattr(raw_data, "model_dump"):
+        raw_data = raw_data.model_dump()
+    elif isinstance(raw_data, list) and raw_data and hasattr(raw_data[0], "model_dump"):
+        raw_data = [item.model_dump() for item in raw_data]
+
+    completeness, warnings = compute_completeness(tool_name, raw_data)
+    envelope = to_envelope(
+        result,
+        identifier=identifier,
+        completeness=completeness,
+        warnings=warnings,
+        **kwargs,
+    )
+    return envelope.model_dump_json()
+
+
+# ---------------------------------------------------------------------------
 # LangChain tool wrappers
 # ---------------------------------------------------------------------------
 # Each wrapper delegates to the async implementation in tools/ and serialises
-# the ToolResult / output to a JSON string the LLM can interpret.
+# the ToolResultEnvelope to a JSON string the LLM can interpret.
 # Imports are deferred inside function bodies to avoid circular-import issues
 # (tools.sec_filings imports agent.llm).
 
@@ -96,7 +139,7 @@ async def get_ohlcv(
     from tools.finance import get_ohlcv as _impl
 
     result = await _impl(symbol, period=period, interval=interval)
-    return result.model_dump_json()
+    return _wrap_envelope("get_ohlcv", result, identifier=symbol.upper())
 
 
 @langchain_tool
@@ -109,7 +152,7 @@ async def get_technical_snapshot(symbol: str) -> str:
     from tools.finance import get_technical_snapshot as _impl
 
     result = await _impl(symbol)
-    return result.model_dump_json()
+    return _wrap_envelope("get_technical_snapshot", result, identifier=symbol.upper())
 
 
 @langchain_tool
@@ -122,7 +165,7 @@ async def get_company_profile(symbol: str) -> str:
     from tools.finance import get_company_profile as _impl
 
     result = await _impl(symbol)
-    return result.model_dump_json()
+    return _wrap_envelope("get_company_profile", result, identifier=symbol.upper())
 
 
 @langchain_tool
@@ -141,7 +184,7 @@ async def get_financial_statements(
     from tools.finance import get_financial_statements as _impl
 
     result = await _impl(symbol, period=period, limit=limit)
-    return result.model_dump_json()
+    return _wrap_envelope("get_financial_statements", result, identifier=symbol.upper())
 
 
 @langchain_tool
@@ -160,7 +203,7 @@ async def get_balance_sheet(
     from tools.finance import get_balance_sheet as _impl
 
     result = await _impl(symbol, period=period, limit=limit)
-    return result.model_dump_json()
+    return _wrap_envelope("get_balance_sheet", result, identifier=symbol.upper())
 
 
 @langchain_tool
@@ -173,7 +216,7 @@ async def get_institutional_holders(symbol: str) -> str:
     from tools.finance import get_institutional_holders as _impl
 
     result = await _impl(symbol)
-    return result.model_dump_json()
+    return _wrap_envelope("get_institutional_holders", result, identifier=symbol.upper())
 
 
 @langchain_tool
@@ -186,7 +229,7 @@ async def get_peers(symbol: str) -> str:
     from tools.finance import get_peers as _impl
 
     result = await _impl(symbol)
-    return result.model_dump_json()
+    return _wrap_envelope("get_peers", result, identifier=symbol.upper())
 
 
 @langchain_tool
@@ -206,7 +249,7 @@ async def screen_stocks(criteria_json: str, limit: int = 20) -> str:
 
     criteria: dict[str, Any] = json.loads(criteria_json)
     result = await _impl(criteria, limit=limit)
-    return result.model_dump_json()
+    return _wrap_envelope("screen_stocks", result, identifier=criteria_json)
 
 
 @langchain_tool
@@ -226,7 +269,7 @@ async def get_filings_metadata(
 
     ft_list = [f.strip() for f in form_types.split(",") if f.strip()]
     result = await _impl(ticker, form_types=ft_list, limit=limit)
-    return result.model_dump_json()
+    return _wrap_envelope("get_filings_metadata", result, identifier=ticker.upper())
 
 
 @langchain_tool
@@ -245,7 +288,27 @@ async def extract_filing_sections(
 
     section_list = [s.strip() for s in sections.split(",") if s.strip()]
     results = await _impl(filing_url, section_list)
-    return json.dumps([s.model_dump() for s in results], default=str)
+    data = [s.model_dump() for s in results]
+    completeness, warnings = compute_completeness("extract_filing_sections", data)
+    now = datetime.now(timezone.utc)
+    envelope = ToolResultEnvelope(
+        data=data,
+        provenance=Provenance(
+            source="sec.gov",
+            retrieved_at=now.isoformat(),
+            as_of=now.strftime("%Y-%m-%d"),
+            identifier=filing_url,
+        ),
+        quality=Quality(warnings=warnings, completeness=completeness),
+        timing=ToolTiming(
+            tool_name="extract_filing_sections",
+            started_at=now,
+            ended_at=now,
+        ),
+        success=bool(data),
+        raw_ref=RawRef(storage_type="cache_key", ref=filing_url),
+    )
+    return envelope.model_dump_json()
 
 
 @langchain_tool
@@ -260,7 +323,7 @@ async def read_filings(query: str) -> str:
     from tools.sec_filings import read_filings as _impl
 
     result = await _impl(query)
-    return result.model_dump_json()
+    return _wrap_envelope("read_filings", result, identifier=query)
 
 
 @langchain_tool
@@ -278,7 +341,7 @@ async def search_web(query: str, max_results: int = 5) -> str:
     from tools.web import web_search as _impl
 
     result = await _impl(query, max_results=min(max_results, 10))
-    return result.model_dump_json()
+    return _wrap_envelope("search_web", result, identifier=query)
 
 
 @langchain_tool
@@ -294,7 +357,7 @@ async def fetch_webpage(url: str) -> str:
     from tools.web import web_fetch as _impl
 
     result = await _impl(url)
-    return result.model_dump_json()
+    return _wrap_envelope("fetch_webpage", result, identifier=url)
 
 
 @langchain_tool
@@ -311,7 +374,7 @@ async def get_social_sentiment(ticker: str) -> str:
     from tools.sentiment import get_social_sentiment as _impl
 
     result = await _impl(ticker)
-    return result.model_dump_json()
+    return _wrap_envelope("get_social_sentiment", result, identifier=ticker.upper())
 
 
 @langchain_tool
@@ -643,8 +706,8 @@ async def finalize_response(state: AgentState) -> dict:
         ctx_parts.append("\n\nRESEARCH DATA COLLECTED:")
         for tr in tool_results:
             result_text = tr.get("result", "")
-            if len(result_text) > 4_000:
-                result_text = result_text[:4_000] + "\n...[truncated]"
+            if len(result_text) > 4_500:
+                result_text = result_text[:4_500] + "\n...[truncated]"
             ctx_parts.append(
                 f"\n[{tr['tool']}({json.dumps(tr['args'], default=str)})]\n"
                 f"{result_text}"
@@ -796,7 +859,7 @@ async def fallback_tool_execution(state: AgentState) -> dict:
                     "args": {"symbol": ticker, "ticker": ticker},
                     "result": output,
                 })
-                data_parts.append(f"[{tool_fn.name}({ticker})]\n{output[:4_000]}")
+                data_parts.append(f"[{tool_fn.name}({ticker})]\n{output[:4_500]}")
                 logger.info(
                     "fallback_tool_execution: fetched %s(%s) — %d chars",
                     tool_fn.name, ticker, len(output),
