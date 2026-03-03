@@ -4,7 +4,9 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter
@@ -16,11 +18,84 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from agent.graph import describe_graph_stage, graph
 from agent.knowledge_graph import upsert_from_tool_results
 from database import SessionLocal
-from models import ChatHistory
+from models import AgentRun, AgentRunEvent, ChatHistory
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Single background thread for fire-and-forget AgentRun/AgentRunEvent writes.
+_persist_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="run-persist")
+
+
+# ---------------------------------------------------------------------------
+# Run persistence helpers
+# ---------------------------------------------------------------------------
+
+def _create_run(session_id: str, mode: str) -> str:
+    """Insert an AgentRun record synchronously. Returns the run_id UUID."""
+    run_id = str(uuid.uuid4())
+    db = SessionLocal()
+    try:
+        db.add(AgentRun(
+            id=run_id,
+            session_id=session_id,
+            mode=mode,
+            status="running",
+            started_at=datetime.now(timezone.utc),
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to create AgentRun %s", run_id)
+    finally:
+        db.close()
+    return run_id
+
+
+def _persist_event(run_id: str, seq: int, event_type: str, payload: dict) -> None:
+    """Insert a single AgentRunEvent. Runs in the _persist_pool thread."""
+    db = SessionLocal()
+    try:
+        db.add(AgentRunEvent(
+            run_id=run_id,
+            seq=seq,
+            type=event_type,
+            payload_json=json.dumps(payload),
+            created_at=datetime.now(timezone.utc),
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.debug("Failed to persist run event seq=%d for run %s", seq, run_id)
+    finally:
+        db.close()
+
+
+def _complete_run(run_id: str, status: str) -> None:
+    """Update AgentRun status and completed_at. Runs in the _persist_pool thread."""
+    db = SessionLocal()
+    try:
+        run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
+        if run:
+            run.status = status
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+    except Exception:
+        db.rollback()
+        logger.debug("Failed to complete run %s", run_id)
+    finally:
+        db.close()
+
+
+def _fire_event(run_id: str, seq: int, event_type: str, payload: dict) -> None:
+    """Non-blocking: submit a persist-event task to the background pool."""
+    _persist_pool.submit(_persist_event, run_id, seq, event_type, payload)
+
+
+def _fire_complete(run_id: str, status: str) -> None:
+    """Non-blocking: submit a complete-run task to the background pool."""
+    _persist_pool.submit(_complete_run, run_id, status)
 
 # ---------------------------------------------------------------------------
 # Validation constants
@@ -107,6 +182,10 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
       done        — stream finished
       error       — unrecoverable error
     """
+    # Create a persistent AgentRun record before streaming starts (synchronous,
+    # fast single INSERT — run_id is needed before any _fire_event calls).
+    run_id = _create_run(request.session_id, request.agent_mode)
+
     initial_state: dict = {
         "messages": [HumanMessage(content=request.message)],
         "intent": "",
@@ -121,6 +200,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "tool_call_count": 0,
         "tool_results": [],
         "agent_mode": request.agent_mode,
+        "run_id": run_id,
     }
 
     # Accumulators filled during streaming
@@ -183,6 +263,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "phase": "stream",
             "message": "Starting agent pipeline",
             "verbose": True,
+            "run_id": run_id,
         })
 
         from agent.ollama_queue import ollama_chat_slot
@@ -210,7 +291,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                         residual = extract_visible_content(flush=True)
                         if residual:
                             yield emit({"type": "token", "content": residual})
-                        
+
                         step_id = f"stage-{name}-{event_seq + 1}"
                         stage_step_ids[name] = step_id
                         yield emit({
@@ -221,6 +302,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                             "message": stage_message,
                             "verbose": True,
                         })
+                        _fire_event(run_id, event_seq, "chain_start", {"phase": name})
 
                 elif evt == "on_chain_end":
                     # Fallback: capture tool_results from any node's on_chain_end
@@ -261,6 +343,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                             "message": stage_message,
                             "verbose": True,
                         })
+                        _fire_event(run_id, event_seq, "chain_end", {"phase": name})
 
                 elif evt == "on_tool_start":
                     residual = extract_visible_content(flush=True)
@@ -284,6 +367,10 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                         "message": f"Using {tool_human_label(name)}",
                     })
                     yield emit({"type": "tool_start", "tool": name, "args": args_preview})
+                    _fire_event(run_id, event_seq, "tool_start", {
+                        "tool": name,
+                        "args_preview": {k: str(v)[:100] for k, v in list(raw_input.items())[:3]},
+                    })
 
                 elif evt == "on_tool_end":
                     residual = extract_visible_content(flush=True)
@@ -358,6 +445,11 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                         ),
                     })
                     yield emit({"type": "tool_end", "tool": name, "duration_ms": duration_ms, "success": success})
+                    _fire_event(run_id, event_seq, "tool_end", {
+                        "tool": name,
+                        "duration_ms": duration_ms,
+                        "success": success,
+                    })
 
                 elif evt == "on_chat_model_stream":
                     chunk = data.get("chunk")
@@ -442,6 +534,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "message": "Agent pipeline complete",
             "verbose": True,
         })
+        _fire_complete(run_id, "success")
         yield emit({"type": "done"})
 
     except asyncio.TimeoutError:
@@ -459,6 +552,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "content": "The request timed out. Please try again.",
             "detail": f"TimeoutError: Graph stream exceeded {GRAPH_STREAM_TIMEOUT}s",
         })
+        _fire_complete(run_id, "timeout")
         yield emit({"type": "done"})
     except RuntimeError as exc:
         # FallbackLLM raises RuntimeError with a user-actionable message when
@@ -477,6 +571,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "content": str(exc),
             "detail": f"RuntimeError: {exc}",
         })
+        _fire_complete(run_id, "error")
         yield emit({"type": "done"})
     except Exception as exc:
         logger.error("Chat stream error: %s", exc, exc_info=True)
@@ -493,6 +588,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "content": f"An error occurred ({type(exc).__name__}). Check the terminal for details.",
             "detail": f"{type(exc).__name__}: {exc}",
         })
+        _fire_complete(run_id, "error")
         yield emit({"type": "done"})
 
 

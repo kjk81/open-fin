@@ -202,3 +202,31 @@ class AnalysisSectionCache(Base):
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     source: Mapped[str] = mapped_column(String(20), default="llm")  # "llm" | "kg" | "cache"
     ttl_seconds: Mapped[int] = mapped_column(Integer, default=14400)  # 4h for technical, 24h for others
+
+
+class AgentRun(Base):
+    """Top-level record for a single LangGraph agent invocation."""
+
+    __tablename__ = "agent_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)  # UUID4
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    mode: Mapped[str] = mapped_column(String(20))  # agent_mode value
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running|success|partial|error|timeout
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AgentRunEvent(Base):
+    """Individual lifecycle event within an AgentRun."""
+
+    __tablename__ = "agent_run_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    seq: Mapped[int] = mapped_column(Integer)
+    type: Mapped[str] = mapped_column(String(20))  # chain_start|chain_end|tool_start|tool_end|error|done
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

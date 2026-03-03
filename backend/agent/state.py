@@ -80,3 +80,7 @@ class AgentState(TypedDict):
     # Agent mode: "genie" | "fundamentals" | "sentiment" | "technical"
     # Written once at start — no reducer needed.
     agent_mode: str
+
+    # UUID of the persisted AgentRun record for this invocation.
+    # Written once at stream start — no reducer needed.
+    run_id: str

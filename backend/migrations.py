@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Version constant — bump when adding a new migration below
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +108,47 @@ def _migration_4(engine: Engine) -> None:
     logger.info("Migration 4: ensured ticker_notes table and indexes exist.")
 
 
+def _migration_5(engine: Engine) -> None:
+    """Add agent_runs and agent_run_events tables for run persistence."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS agent_runs ("
+            "  id VARCHAR(36) PRIMARY KEY,"
+            "  session_id VARCHAR(64) NOT NULL,"
+            "  mode VARCHAR(20) NOT NULL,"
+            "  status VARCHAR(20) NOT NULL DEFAULT 'running',"
+            "  started_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  completed_at DATETIME"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_agent_runs_session_id "
+            "ON agent_runs (session_id)"
+        ))
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS agent_run_events ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  run_id VARCHAR(36) NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,"
+            "  seq INTEGER NOT NULL,"
+            "  type VARCHAR(20) NOT NULL,"
+            "  payload_json TEXT DEFAULT '{}',"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_agent_run_events_run_id "
+            "ON agent_run_events (run_id)"
+        ))
+    logger.info("Migration 5: created agent_runs and agent_run_events tables.")
+
+
 # Ordered list — index 0 = migration 1, index N-1 = migration N
 MIGRATIONS: list[Callable[[Engine], None]] = [
     _migration_1,
     _migration_2,
     _migration_3,
     _migration_4,
+    _migration_5,
 ]
 
 
