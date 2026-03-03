@@ -67,12 +67,38 @@ _SINGLE_CALL_POLICY: str = (
     "Gather ALL required financial data in ONE parallel tool-call block "
     "whenever possible.  For example, when analyzing a stock, call "
     "get_company_profile, get_financial_statements, get_technical_snapshot, "
-    "and get_balance_sheet simultaneously in a single response — do NOT call "
-    "them one at a time.\n\n"
+    "get_balance_sheet, and get_social_sentiment simultaneously in a single "
+    "response — do NOT call them one at a time.\n\n"
     "Only request additional tool calls if earlier results reveal new "
     "questions that could not have been anticipated (e.g. a peer comparison "
     "after discovering the sector).  Keep the total number of tool-call "
     "rounds to an absolute minimum."
+)
+
+# ---------------------------------------------------------------------------
+# Web research and social sentiment directive
+# ---------------------------------------------------------------------------
+
+_WEB_RESEARCH_DIRECTIVE: str = (
+    "WEB RESEARCH & SOCIAL SENTIMENT:\n"
+    "You have access to three live web tools:\n"
+    "  \u2022 get_social_sentiment(ticker) \u2014 scrapes Reddit and Twitter/X for retail "
+    "investor mood, synthesises Overall Bias, Key Catalysts, and Majority Opinion.\n"
+    "  \u2022 search_web(query) \u2014 general web search for breaking news, earnings "
+    "surprises, analyst upgrades, regulatory events, or any topic not covered "
+    "by financial data APIs.\n"
+    "  \u2022 fetch_webpage(url) \u2014 reads the full text of a specific article, press "
+    "release, or filing URL found in search results.\n\n"
+    "When to use these tools:\n"
+    "  - For ANY ticker_deep_dive or trade_recommendation: ALWAYS call "
+    "get_social_sentiment alongside fundamental and technical tools to capture "
+    "retail sentiment that data APIs miss.\n"
+    "  - When technical/fundamental data is insufficient or ambiguous: use "
+    "search_web to find recent catalysts, guidance updates, or macro context.\n"
+    "  - When a search result references a specific article you need to read: "
+    "use fetch_webpage to retrieve the full content.\n"
+    "Social sentiment is a market-moving factor \u2014 ignoring it leaves your "
+    "analysis incomplete."
 )
 
 # ---------------------------------------------------------------------------
@@ -137,6 +163,7 @@ def get_router_soul_prompt(agent_mode: str = "genie") -> str:
         _ENTITY_RECOGNITION,
         _TOOL_ENFORCEMENT,
         _SINGLE_CALL_POLICY,
+        _WEB_RESEARCH_DIRECTIVE,
         _SKILLS_BLOCK,
     ]
 

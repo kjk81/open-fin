@@ -23,7 +23,7 @@ import type {
   AnalysisSectionName,
   AgentMode,
   DashboardMetrics,
-  TickerEventItem,
+  TickerEventsResponse,
   TickerNote,
   PaginatedTickerNotes,
   GraphConnectionsSummary,
@@ -99,7 +99,7 @@ export async function fetchDashboardMetrics(): Promise<DashboardMetrics> {
   return res.json();
 }
 
-export async function fetchTickerEvents(symbol: string): Promise<TickerEventItem[]> {
+export async function fetchTickerEvents(symbol: string): Promise<TickerEventsResponse> {
   const res = await fetch(`${API}/api/ticker/${encodeURIComponent(symbol)}/events`);
   if (!res.ok) throw new Error(`Ticker events fetch failed: ${res.status}`);
   return res.json();
@@ -480,7 +480,7 @@ export async function streamChat(
         onSources(event.sources ?? []);
       } else if (event.type === "kg_update" && onKgUpdate) {
         onKgUpdate(event.nodes_created ?? 0, event.edges_created ?? 0, event.error);
-      } else if ((event.type === "step" || event.type === "status") && onProgressEvent) {
+      } else if (event.type === "step" && onProgressEvent) {
         const rawState = event.state;
         const state =
           rawState === "done" || rawState === "error" || rawState === "running"

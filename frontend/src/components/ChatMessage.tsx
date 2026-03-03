@@ -110,7 +110,7 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
         )}
       </div>
       <div className="chat-meta">
-        {isUser ? "You" : isSystem ? "System" : "Open-Fin AI"}
+        {isUser ? "You" : isSystem ? "System" : "Finneas"}
       </div>
     </div>
   );

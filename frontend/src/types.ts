@@ -33,6 +33,21 @@ export interface TickerEventItem {
   occurred_at: string;
 }
 
+export interface SentimentSnapshot {
+  overall_bias: "Bullish" | "Bearish" | "Neutral" | "Mixed";
+  key_catalysts: string[];
+  majority_opinion: string;
+  reddit_summary: string;
+  twitter_summary: string;
+  confidence: "High" | "Medium" | "Low";
+  searched_at: string;
+}
+
+export interface TickerEventsResponse {
+  sentiment: SentimentSnapshot | null;
+  events: TickerEventItem[];
+}
+
 export interface PortfolioPosition {
   symbol: string;
   qty: number;

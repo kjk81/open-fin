@@ -723,6 +723,63 @@ async def _proc_institutional_holders(
     return nodes_c, edges_c, new_ids, new_texts
 
 
+async def _proc_social_sentiment(
+    session: AsyncSession,
+    args: dict,
+    data: dict,
+) -> tuple[int, int, list[int], list[str]]:
+    """Persist a SentimentSnapshot as a KG node and create a SENTIMENT edge.
+
+    Creates a ``sentiment`` node keyed by ``sentiment:{ticker}:{date}`` and
+    links it to the company node with a ``SENTIMENT`` edge.  Edge weight is
+    derived from confidence: High → 1.0, Medium → 0.7, Low → 0.4.
+    """
+    ticker = (data.get("ticker") or args.get("ticker") or "").upper().strip()
+    if not ticker:
+        return 0, 0, [], []
+
+    new_ids: list[int] = []
+    new_texts: list[str] = []
+    nodes_c = 0
+    edges_c = 0
+
+    # Ensure company node exists
+    c_id, c_new = await _aupsert_node(session, "company", ticker)
+    if c_new:
+        new_ids.append(c_id)
+        new_texts.append(ticker)
+        nodes_c += 1
+
+    # Build sentiment node name (one per ticker per day)
+    today = date.today().isoformat()
+    node_name = f"sentiment:{ticker}:{today}"
+    meta = {
+        "ticker": ticker,
+        "overall_bias": data.get("overall_bias", ""),
+        "key_catalysts": data.get("key_catalysts", []),
+        "majority_opinion": data.get("majority_opinion", ""),
+        "reddit_summary": data.get("reddit_summary", ""),
+        "twitter_summary": data.get("twitter_summary", ""),
+        "confidence": data.get("confidence", "Low"),
+        "searched_at": data.get("searched_at", today),
+    }
+    s_id, s_new = await _aupsert_node(session, "sentiment", node_name, meta)
+    if s_new:
+        new_ids.append(s_id)
+        bias = data.get("overall_bias", "Neutral")
+        emb_text = (
+            f"{ticker} social sentiment {today}: {bias}. "
+            f"{data.get('majority_opinion', '')}"
+        )
+        new_texts.append(emb_text)
+        nodes_c += 1
+
+    if await _aupsert_edge(session, c_id, s_id, "SENTIMENT"):
+        edges_c += 1
+
+    return nodes_c, edges_c, new_ids, new_texts
+
+
 # Tool name → processor mapping
 _TOOL_PROCESSORS: dict[str, Any] = {
     "get_company_profile": _proc_company_profile,
@@ -734,11 +791,13 @@ _TOOL_PROCESSORS: dict[str, Any] = {
     "screen_stocks": _proc_screen_stocks,
     "get_ohlcv": _proc_ohlcv,
     "get_institutional_holders": _proc_institutional_holders,
+    "get_social_sentiment": _proc_social_sentiment,
 }
 
 # Tools whose sources become WebDocument nodes
 _DOCUMENT_TOOLS: frozenset[str] = frozenset(
-    {"extract_filing_sections", "read_filings", "get_filings_metadata"}
+    {"extract_filing_sections", "read_filings", "get_filings_metadata",
+     "search_web", "fetch_webpage"}
 )
 
 

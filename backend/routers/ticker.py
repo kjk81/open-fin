@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import yfinance as yf
 from fastapi import APIRouter, HTTPException
 
-from tools.web import web_search
+from tools.sentiment import get_social_sentiment
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,21 +53,33 @@ def get_ticker(symbol: str):
 @router.get("/ticker/{symbol}/events")
 async def get_ticker_events(symbol: str):
     symbol = symbol.upper()
-    query = f"{symbol} stock news current events"
-    search_result = await web_search(query=query, max_results=10)
+    result = await get_social_sentiment(symbol)
 
+    sentiment_data = None
+    events: list[dict] = []
     occurred_at = datetime.now(timezone.utc).isoformat()
-    hits = search_result.data.hits if search_result.success else []
-    provider = search_result.data.provider
 
-    return [
-        {
-            "title": hit.title,
-            "url": str(hit.url),
-            "snippet": hit.snippet,
-            "provider": provider,
+    if result.success and result.data:
+        snap = result.data
+        sentiment_data = {
+            "overall_bias": snap.overall_bias,
+            "key_catalysts": snap.key_catalysts,
+            "majority_opinion": snap.majority_opinion,
+            "reddit_summary": snap.reddit_summary,
+            "twitter_summary": snap.twitter_summary,
+            "confidence": snap.confidence,
+            "searched_at": snap.searched_at.isoformat(),
+        }
+
+    # Surface search hit sources as event items
+    for idx, src in enumerate(result.sources):
+        events.append({
+            "title": src.title,
+            "url": str(src.url),
+            "snippet": "",
+            "provider": "web",
             "rank": idx + 1,
             "occurred_at": occurred_at,
-        }
-        for idx, hit in enumerate(hits)
-    ]
+        })
+
+    return {"sentiment": sentiment_data, "events": events}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
@@ -13,6 +14,8 @@ ProviderName = Literal[
     "tiingo",
     "eodhd",
 ]
+
+logger = logging.getLogger(__name__)
 
 DataCategory = Literal["price", "fundamentals", "historical", "news"]
 
@@ -174,6 +177,7 @@ async def run_fallback_chain(
     per_provider_timeout: float = 15.0,
 ) -> ChainResult:
     attempts: list[AttemptRecord] = []
+    logger.info("Finance fallback: starting chain for category=%s endpoint=%s", category, endpoint_id)
 
     for provider in CATEGORY_PROVIDER_ORDER[category]:
         handler = handlers.get(provider)
@@ -186,10 +190,14 @@ async def run_fallback_chain(
             continue
 
         try:
+            logger.info("  - Attempting provider: %s", provider)
             payload = await asyncio.wait_for(handler(), timeout=per_provider_timeout)
             attempts.append(AttemptRecord(provider=provider, status="success"))
+            logger.info("  - Success with provider: %s", provider)
             return ChainResult(provider=provider, payload=payload, attempts=attempts)
         except Exception as exc:
+            logger.warning("  - Failed with provider %s: %s", provider, exc)
             attempts.append(AttemptRecord(provider=provider, status="failed", reason=str(exc)))
 
+    logger.error("Finance fallback: all providers failed for %s/%s", category, endpoint_id)
     raise FallbackChainExhaustedError(category=category, endpoint_id=endpoint_id, attempts=attempts)

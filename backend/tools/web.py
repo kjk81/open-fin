@@ -220,20 +220,23 @@ async def web_search(
         actual_provider: str | None = None
         hits: list[SearchHit] = []
 
+        logger.info("Web search: query=%r, trying providers: %s", query, provider_order)
+
         for attempt_provider in provider_order:
             try:
+                logger.info("  - Attempting provider: %s", attempt_provider)
                 if attempt_provider == "tavily":
                     hits = await _search_tavily(query, max_results)
                 else:
                     hits = await _search_exa(query, max_results)
                 actual_provider = attempt_provider
+                logger.info("  - Success with provider: %s", attempt_provider)
                 break
             except Exception as exc:
                 attempted_errors[attempt_provider] = str(exc)
                 logger.warning(
-                    "web_search provider failed (provider=%s, query=%r): %s",
+                    "  - Provider failed (provider=%s): %s",
                     attempt_provider,
-                    query,
                     exc,
                 )
 

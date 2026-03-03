@@ -264,6 +264,57 @@ async def read_filings(query: str) -> str:
 
 
 @langchain_tool
+async def search_web(query: str, max_results: int = 5) -> str:
+    """Search the web for current news, events, or information about a topic.
+
+    Use this to find breaking news, recent developments, or any information
+    not captured by financial data APIs.  Prefer get_social_sentiment for
+    Reddit/Twitter sentiment; use search_web for general news searches.
+
+    Args:
+        query: The search query string.
+        max_results: Maximum number of results to return (default 5, max 10).
+    """
+    from tools.web import web_search as _impl
+
+    result = await _impl(query, max_results=min(max_results, 10))
+    return result.model_dump_json()
+
+
+@langchain_tool
+async def fetch_webpage(url: str) -> str:
+    """Fetch and extract readable content from a webpage URL.
+
+    Use this to read a specific article, press release, or filing page
+    referenced in search results or provided by the user.
+
+    Args:
+        url: The full URL to fetch.
+    """
+    from tools.web import web_fetch as _impl
+
+    result = await _impl(url)
+    return result.model_dump_json()
+
+
+@langchain_tool
+async def get_social_sentiment(ticker: str) -> str:
+    """Get social media sentiment for a stock ticker from Reddit and Twitter/X.
+
+    Runs targeted searches, fetches top posts, and synthesises an LLM-powered
+    Sentiment Snapshot with Overall Bias, Key Catalysts, and Majority Opinion.
+    Results are cached for 24 hours.
+
+    Args:
+        ticker: Stock ticker symbol (e.g. "AAPL", "TSLA").
+    """
+    from tools.sentiment import get_social_sentiment as _impl
+
+    result = await _impl(ticker)
+    return result.model_dump_json()
+
+
+@langchain_tool
 def load_skill(skill_name: str) -> str:
     """Load a reusable analytical skill (playbook) by name.
 
@@ -305,6 +356,9 @@ FINANCE_TOOLS: list = [
     get_filings_metadata,
     extract_filing_sections,
     read_filings,
+    search_web,
+    fetch_webpage,
+    get_social_sentiment,
     load_skill,
 ]
 
@@ -324,8 +378,10 @@ def _get_model(role: str = "subagent"):
     """
     mode, fallback_order, subagent_order = load_llm_settings()
     order = _effective_order_for_role(mode, fallback_order, role=role, subagent_order=subagent_order)
+    logger.info("Model selection: trying providers in order (role=%s): %s", role, list(order))
 
     for provider in order:
+        logger.info("  - Attempting provider: %s", provider)
         model = _provider_model(provider, role=role)
         if model is not None:
             logger.info("Model selected: provider=%s role=%s", provider, role)
