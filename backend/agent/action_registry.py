@@ -240,6 +240,84 @@ def _build_delta_preview_inner(tool_name: str, args: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Rollback hint builder
+# ---------------------------------------------------------------------------
+
+
+def build_rollback_hint(tool_name: str, args: dict[str, Any]) -> str:
+    """Return a human-readable string describing how to manually reverse a write.
+
+    Used exclusively by _log_state_write to populate rollback_hint in state_write
+    events. Never raises — falls back to a generic message on any error.
+    """
+    try:
+        return _build_rollback_hint_inner(tool_name, args)
+    except Exception:
+        return f"No automated rollback available for {tool_name}"
+
+
+def _build_rollback_hint_inner(tool_name: str, args: dict[str, Any]) -> str:
+    # ── WRITES_KG ────────────────────────────────────────────────────────────
+    if tool_name == "confirm_memory_write":
+        proposal_id = str(args.get("proposal_id", "<proposal_id>")).strip()
+        decision = str(args.get("decision", "confirm")).lower()
+        if decision in {"confirm", "yes", "approve"}:
+            return f"confirm_memory_write(proposal_id='{proposal_id}', decision='discard')"
+        return "Already discarded — no rollback needed"
+
+    if tool_name in {"add_kg_node", "upsert_kg_entity"}:
+        entity = str(args.get("name", args.get("entity", "<entity>"))).strip()
+        return f"delete_kg_node(name='{entity}')"
+
+    if tool_name in {"delete_kg_node", "remove_kg_entity"}:
+        entity = str(args.get("name", args.get("entity", "<entity>"))).strip()
+        return f"add_kg_node(name='{entity}') — must re-supply original properties manually"
+
+    if tool_name == "link_kg_entities":
+        src = str(args.get("source", args.get("from", "<source>"))).strip()
+        dst = str(args.get("target", args.get("to", "<target>"))).strip()
+        rel = str(args.get("relation", args.get("relationship", "relates_to"))).strip()
+        return f"Unlink '{src}' → '{dst}' ({rel}) via KG admin API"
+
+    # ── WRITES_PORTFOLIO ─────────────────────────────────────────────────────
+    if tool_name in {"execute_trade", "place_order", "submit_order"}:
+        action = str(args.get("action", args.get("side", ""))).upper()
+        ticker = str(args.get("ticker", args.get("symbol", "<ticker>"))).upper()
+        qty = args.get("qty", args.get("quantity", args.get("shares", "")))
+        reverse = "SELL" if action == "BUY" else "BUY" if action == "SELL" else "reverse"
+        if qty:
+            return f"cancel_order(order_id=<returned_order_id>) OR execute_trade(action='{reverse}', ticker='{ticker}', qty={qty})"
+        return f"cancel_order(order_id=<returned_order_id>)"
+
+    if tool_name == "cancel_order":
+        return "Cannot un-cancel an order — re-place manually if needed"
+
+    if tool_name in {"add_to_portfolio", "add_to_watchlist"}:
+        ticker = str(args.get("ticker", args.get("symbol", "<ticker>"))).upper()
+        reverse_tool = "remove_from_portfolio" if "portfolio" in tool_name else "remove_from_watchlist"
+        return f"{reverse_tool}(ticker='{ticker}')"
+
+    if tool_name in {"remove_from_portfolio", "remove_from_watchlist"}:
+        ticker = str(args.get("ticker", args.get("symbol", "<ticker>"))).upper()
+        reverse_tool = "add_to_portfolio" if "portfolio" in tool_name else "add_to_watchlist"
+        return f"{reverse_tool}(ticker='{ticker}')"
+
+    # ── STRATEGY_TRIGGER ─────────────────────────────────────────────────────
+    if tool_name in {"run_backtest", "execute_strategy", "trigger_strategy", "schedule_strategy"}:
+        return "Strategy runs are read-only simulations — no persistent state mutated unless output is committed"
+
+    # ── ADMIN ─────────────────────────────────────────────────────────────────
+    if tool_name == "reset_session":
+        return "No automated rollback — session state is gone; restore from prior episodic_summaries if needed"
+    if tool_name in {"clear_memory", "purge_kg"}:
+        return "No automated rollback — manual database restore from backup required"
+    if tool_name == "rebuild_faiss_index":
+        return "Re-run rebuild_faiss_index to regenerate — no data loss if KG is intact"
+
+    return f"No automated rollback available for {tool_name}"
+
+
+# ---------------------------------------------------------------------------
 # Startup validation utility
 # ---------------------------------------------------------------------------
 

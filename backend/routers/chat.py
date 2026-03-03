@@ -33,6 +33,11 @@ router = APIRouter()
 # Single background thread for fire-and-forget AgentRun/AgentRunEvent writes.
 _persist_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="run-persist")
 
+# In-memory store for paused graph states awaiting user confirmation.
+# Keyed by session_id; replaced on each new pause for the same session.
+# Value: the full LangGraph final-state dict captured from on_chain_end.
+_PENDING_CONFIRMATIONS: dict[str, dict] = {}
+
 
 # ---------------------------------------------------------------------------
 # Run persistence helpers
@@ -235,6 +240,10 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "pending_memory_write": False,
         "memory_consent_status": "none",
         "memory_write_proposal": {},
+        # Action Registry / confirmation gate fields
+        "pending_actions": [],
+        "confirmed_tokens": [],
+        "confirmation_pending": False,
     }
 
     # Accumulators filled during streaming
@@ -435,6 +444,28 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                                     "run_id": run_id,
                                     "details": proposal,
                                 })
+
+                        # Confirmation gate pause — non-READ_ONLY tools blocked
+                        if bool(chain_output.get("confirmation_pending")):
+                            unconfirmed = chain_output.get("pending_actions") or []
+                            # Store paused state so /api/chat/confirm can resume
+                            _PENDING_CONFIRMATIONS[request.session_id] = {
+                                "state": chain_output,
+                                "run_id": run_id,
+                                "session_id": request.session_id,
+                            }
+                            yield emit({
+                                "type": "action_preview",
+                                "run_id": run_id,
+                                "session_id": request.session_id,
+                                "message": (
+                                    "The following write operations require your confirmation "
+                                    "before they can execute. POST /api/chat/confirm with the "
+                                    "action IDs you approve."
+                                ),
+                                "unconfirmed_actions": unconfirmed,
+                                "confirm_url": "/api/chat/confirm",
+                            })
 
                     stage_message = describe_graph_stage(name, "end")
                     if stage_message:
@@ -799,6 +830,140 @@ async def chat_endpoint(request: ChatRequest):
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",  # Prevents nginx from buffering the stream
+            "Connection": "keep-alive",
+        },
+    )
+
+
+class ConfirmRequest(BaseModel):
+    """Body for POST /api/chat/confirm — resumes a paused graph run."""
+    session_id: str = Field(..., min_length=1, max_length=64)
+    run_id: str = Field(..., min_length=1, max_length=64)
+    confirmed_action_ids: list[str] = Field(default_factory=list)
+    """action_id strings from the unconfirmed_actions list in the action_preview event."""
+
+    _check_session_id = field_validator("session_id")(_validate_session_id)
+
+
+@router.post("/chat/confirm")
+async def confirm_actions(request: ConfirmRequest):
+    """POST /api/chat/confirm
+
+    Resume a graph run that paused at the confirmation gate.
+
+    The frontend receives an ``action_preview`` SSE event when the graph hits
+    non-READ_ONLY tools.  After the user approves, POST here with the
+    ``action_id`` values from the preview.  The endpoint retrieves the paused
+    state, injects the confirmed tokens, and re-streams the graph from that
+    point.
+
+    Response: text/event-stream (same SSE format as /api/chat)
+    """
+    pending = _PENDING_CONFIRMATIONS.get(request.session_id)
+    if not pending:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No pending confirmation found for this session. "
+                "The session may have expired or already been resumed."
+            ),
+        )
+    if pending["run_id"] != request.run_id:
+        raise HTTPException(
+            status_code=409,
+            detail="run_id mismatch — this confirmation belongs to a different run.",
+        )
+
+    # Build resume state from saved snapshot
+    saved_state: dict = pending["state"]
+
+    # Assemble the resume state: restore all accumulated fields and inject
+    # confirmed tokens so the gate passes and execute_tool_calls can proceed.
+    resume_state: dict = {
+        **saved_state,
+        # Confirmed tokens from user — operator.add reducer appends on top of
+        # any previously confirmed tokens already in saved_state.
+        "confirmed_tokens": list(set(
+            saved_state.get("confirmed_tokens", []) + request.confirmed_action_ids
+        )),
+        "confirmation_pending": False,
+    }
+
+    # Remove from pending store so duplicate confirms are rejected
+    del _PENDING_CONFIRMATIONS[request.session_id]
+
+    async def _resume_stream() -> AsyncGenerator[str, None]:
+        seq = 0
+
+        def emit(data: dict[str, Any]) -> str:
+            nonlocal seq
+            seq += 1
+            return _sse({"seq": seq, **data})
+
+        run_id = request.run_id
+        try:
+            yield emit({"type": "status", "state": "running", "message": "Resuming after confirmation…", "run_id": run_id})
+            event_iter = graph.astream_events(resume_state, version="v2").__aiter__()
+            while True:
+                try:
+                    event = await asyncio.wait_for(event_iter.__anext__(), timeout=GRAPH_STREAM_TIMEOUT)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    yield emit({"type": "error", "content": "Graph resume timed out."})
+                    break
+
+                evt: str = event.get("event", "")
+                data: dict = event.get("data", {})
+
+                if evt == "on_chat_model_stream":
+                    chunk = data.get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        content = chunk.content
+                        if isinstance(content, list):
+                            content = "".join(
+                                item.get("text", "") if isinstance(item, dict) else str(item)
+                                for item in content
+                            )
+                        elif not isinstance(content, str):
+                            content = str(content)
+                        # Skip internal action_preview JSON messages
+                        if not content.startswith('{"type": "action_preview"'):
+                            yield emit({"type": "token", "content": content})
+
+                elif evt == "on_chain_end":
+                    chain_output = data.get("output") or {}
+                    if isinstance(chain_output, dict):
+                        # Surface any new confirmation pause (nested write in same run)
+                        if bool(chain_output.get("confirmation_pending")):
+                            unconfirmed = chain_output.get("pending_actions") or []
+                            _PENDING_CONFIRMATIONS[request.session_id] = {
+                                "state": chain_output,
+                                "run_id": run_id,
+                                "session_id": request.session_id,
+                            }
+                            yield emit({
+                                "type": "action_preview",
+                                "run_id": run_id,
+                                "session_id": request.session_id,
+                                "message": "Additional write operations require confirmation.",
+                                "unconfirmed_actions": unconfirmed,
+                                "confirm_url": "/api/chat/confirm",
+                            })
+
+            _fire_complete(run_id, "success")
+            yield emit({"type": "done", "run_id": run_id})
+        except Exception as exc:
+            logger.error("confirm_actions resume failed: %s", exc, exc_info=True)
+            _fire_complete(run_id, "error")
+            yield emit({"type": "error", "content": f"Resume failed: {exc}"})
+
+    return StreamingResponse(
+        _resume_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
     )

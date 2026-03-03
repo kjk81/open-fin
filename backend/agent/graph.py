@@ -1478,16 +1478,25 @@ async def execute_tool_calls(state: AgentState) -> dict:
             ActionCategory,
             ActionPreview,
             build_delta_preview,
+            build_rollback_hint,
             get_action_category,
         )
         category = get_action_category(name)
+        confirmed_set: set[str] = set(state.get("confirmed_tokens", []))
+
         if category != ActionCategory.READ_ONLY:
             justification_citations = [
                 item.get("ref_id", "")
                 for item in state.get("tool_results", [])[-5:]
                 if isinstance(item, dict) and item.get("ref_id")
             ]
+            # Deterministic action_id — same (tool, args) always maps to the
+            # same ID so the confirmation token survives graph re-invocation.
+            deterministic_id = hashlib.sha256(
+                json.dumps({"tool": name, "args": args}, sort_keys=True).encode()
+            ).hexdigest()[:16]
             preview = ActionPreview(
+                action_id=deterministic_id,
                 tool=name,
                 category=category,
                 args=args,
@@ -1501,6 +1510,27 @@ async def execute_tool_calls(state: AgentState) -> dict:
                 category,
                 preview.delta_preview,
             )
+
+            # --- Confirmation guard ---
+            # Block execution if this action_id has not been confirmed by the user.
+            if preview.action_id not in confirmed_set:
+                logger.info(
+                    "execute_tool_calls: blocking %s (action_id=%s) — awaiting confirmation",
+                    name,
+                    preview.action_id,
+                )
+                output = json.dumps({
+                    "status": "awaiting_confirmation",
+                    "action_id": preview.action_id,
+                    "delta_preview": preview.delta_preview,
+                    "message": (
+                        "This action requires explicit user confirmation before it can execute. "
+                        "Please review the action preview and confirm via /api/chat/confirm."
+                    ),
+                })
+                tool_messages.append(ToolMessage(content=output, tool_call_id=call_id))
+                tool_results.append({"tool": name, "args": args, "result": output})
+                continue
 
         handler = _TOOL_MAP.get(name)
         if handler is None:
@@ -1516,6 +1546,25 @@ async def execute_tool_calls(state: AgentState) -> dict:
         tool_results.append({"tool": name, "args": args, "result": output})
         citations.extend(_extract_sources_from_result(output))
         executed_count += 1
+
+        # --- Transaction logging for confirmed writes ---
+        if category != ActionCategory.READ_ONLY:
+            # Find the confirmation token that authorised this action
+            confirmation_token = next(
+                (t for t in confirmed_set if t == preview.action_id), preview.action_id
+            )
+            run_id = state.get("run_id", "")
+            if run_id:
+                seq = state.get("tool_call_count", 0) + executed_count
+                _log_state_write(
+                    run_id=run_id,
+                    seq=seq,
+                    tool_name=name,
+                    args=args,
+                    result=output,
+                    confirmation_token=confirmation_token,
+                    rollback_hint=build_rollback_hint(name, args),
+                )
 
     logger.info(
         "execute_tool_calls: executed %d tool(s), total call count → %d",
@@ -1543,6 +1592,126 @@ async def execute_tool_calls(state: AgentState) -> dict:
         "pending_actions": preview_entries,  # reducer *appends* non-READ_ONLY previews
         "confirmed_tokens": [],              # reducer *appends*; tokens added by consent gate
     }
+
+
+# ---------------------------------------------------------------------------
+# Transaction logging helper
+# ---------------------------------------------------------------------------
+
+
+def _log_state_write(
+    run_id: str,
+    seq: int,
+    tool_name: str,
+    args: dict[str, Any],
+    result: str,
+    confirmation_token: str,
+    rollback_hint: str,
+) -> None:
+    """Write a ``state_write`` event to ``agent_run_events`` for audit trail.
+
+    Opens its own DB session so graph.py stays free of circular imports
+    with routers.chat. Runs synchronously — intended to be called from the
+    async execute_tool_calls node which is already in a thread or async context.
+    Failures are logged and swallowed so a logging error never aborts a tool call.
+    """
+    try:
+        from .action_registry import build_delta_preview
+        from database import SessionLocal  # late import — avoids module-level circular dep
+        from models import AgentRunEvent   # same
+
+        # Truncate large tool results so the payload stays DB-friendly
+        result_summary = result[:500] + "…" if len(result) > 500 else result
+
+        payload = {
+            "tool": tool_name,
+            "args": args,
+            "result_summary": result_summary,
+            "delta": build_delta_preview(tool_name, args),
+            "confirmation_token": confirmation_token,
+            "rollback_hint": rollback_hint,
+        }
+        db = SessionLocal()
+        try:
+            db.add(AgentRunEvent(
+                run_id=run_id,
+                seq=seq,
+                type="state_write",
+                payload_json=json.dumps(payload),
+                created_at=datetime.now(timezone.utc),
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("_log_state_write: failed to persist state_write event: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Node: confirmation_gate
+# ---------------------------------------------------------------------------
+
+
+async def confirmation_gate(state: AgentState) -> dict:
+    """Gate between execute_tool_calls and route_finance_query.
+
+    Inspects ``pending_actions`` for any non-READ_ONLY action whose
+    ``action_id`` is not yet in ``confirmed_tokens``.  If unconfirmed actions
+    exist the graph returns with ``confirmation_pending=True`` so the
+    LangGraph END is reached and the chat router can stream an
+    ``action_preview`` SSE event to the frontend.
+
+    Once the user POSTs ``/api/chat/confirm`` with the action IDs, those IDs
+    are injected into ``confirmed_tokens`` and the graph is re-invoked; on the
+    next pass this gate finds no unconfirmed actions and lets the loop continue.
+    """
+    pending = state.get("pending_actions", [])
+    confirmed = set(state.get("confirmed_tokens", []))
+
+    unconfirmed = [p for p in pending if p.get("action_id") not in confirmed]
+
+    if not unconfirmed:
+        logger.debug("confirmation_gate: no unconfirmed actions — passing through")
+        return {"confirmation_pending": False}
+
+    logger.info(
+        "confirmation_gate: %d unconfirmed action(s) — pausing graph",
+        len(unconfirmed),
+    )
+
+    # Emit a structured AIMessage so the SSE stream forwards the preview to the UI
+    preview_payload = {
+        "type": "action_preview",
+        "unconfirmed_actions": unconfirmed,
+        "message": (
+            f"I need your confirmation before proceeding with "
+            f"{len(unconfirmed)} write operation(s). "
+            "Please review and confirm or reject each action."
+        ),
+    }
+    preview_message = AIMessage(
+        content=json.dumps(preview_payload),
+        additional_kwargs={"action_preview": unconfirmed},
+    )
+
+    return {
+        "messages": [preview_message],
+        "confirmation_pending": True,
+    }
+
+
+def _route_after_confirmation(state: AgentState) -> str:
+    """Return destination after confirmation_gate.
+
+    ``confirmation_pending=True`` → END (graph pauses; frontend notified).
+    ``confirmation_pending=False`` → route_finance_query (tool loop continues).
+    """
+    if state.get("confirmation_pending"):
+        return "END"
+    return "route_finance_query"
 
 
 # ---------------------------------------------------------------------------
@@ -2104,7 +2273,12 @@ def build_graph():
                      Yes → route_finance_query ←───────────────┐      │
                               ↓ (conditional)              ┌───┘      │
                            tool_calls AND count < 5?       │          │
-                              Yes → execute_tool_calls ────┘          │
+                              Yes → execute_tool_calls     │          │
+                                       ↓                  │          │
+                                  confirmation_gate ───────┘          │
+                                       ↓ (unconfirmed writes)         │
+                                      END  ← graph pauses; frontend   │
+                                             must POST /api/chat/confirm
                               No, count==0 → force_tool_retry ────────┘ (loops back)
                                         No  → verification_gate ─→ finalize_response → END
                                                                 └──────→ tiebreaker_tool_execution ─┐
@@ -2122,6 +2296,7 @@ def build_graph():
     builder.add_node("generation_node", generation_node)
     builder.add_node("route_finance_query", route_finance_query)
     builder.add_node("execute_tool_calls", execute_tool_calls)
+    builder.add_node("confirmation_gate", confirmation_gate)
     builder.add_node("force_tool_retry", force_tool_retry)
     builder.add_node("fallback_tool_execution", fallback_tool_execution)
     builder.add_node("verification_gate", verification_gate)
@@ -2155,6 +2330,18 @@ def build_graph():
         },
     )
 
+    # execute_tool_calls → confirmation_gate (always)
+    # confirmation_gate  → route_finance_query (no pending) | END (pending)
+    builder.add_edge("execute_tool_calls", "confirmation_gate")
+    builder.add_conditional_edges(
+        "confirmation_gate",
+        _route_after_confirmation,
+        {
+            "route_finance_query": "route_finance_query",
+            "END": END,
+        },
+    )
+
     builder.add_conditional_edges(
         "verification_gate",
         _route_after_verification,
@@ -2165,7 +2352,6 @@ def build_graph():
         },
     )
 
-    builder.add_edge("execute_tool_calls", "route_finance_query")
     builder.add_edge("force_tool_retry", "route_finance_query")
     builder.add_edge("fallback_tool_execution", "verification_gate")
     builder.add_edge("tiebreaker_tool_execution", "verification_gate")

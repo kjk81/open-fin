@@ -140,3 +140,7 @@ class AgentState(TypedDict):
     # Confirmed action_id tokens from the UI or a future consent gate node.
     # operator.add appends across rounds; initialized empty.
     confirmed_tokens: Annotated[list[str], operator.add]
+
+    # True when confirmation_gate is holding unconfirmed non-READ_ONLY actions.
+    # Graph pauses at END and frontend must POST /api/chat/confirm to resume.
+    confirmation_pending: bool
