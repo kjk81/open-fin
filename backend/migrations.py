@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Version constant — bump when adding a new migration below
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 # ---------------------------------------------------------------------------
@@ -86,11 +86,34 @@ def _migration_3(engine: Engine) -> None:
     logger.info("Migration 3: created analysis_section_cache table.")
 
 
+def _migration_4(engine: Engine) -> None:
+    """Add ticker_notes table for per-ticker note history entries."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS ticker_notes ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  ticker VARCHAR(20) NOT NULL,"
+            "  content TEXT NOT NULL,"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_ticker_notes_ticker "
+            "ON ticker_notes (ticker)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_ticker_notes_created_at "
+            "ON ticker_notes (created_at)"
+        ))
+    logger.info("Migration 4: ensured ticker_notes table and indexes exist.")
+
+
 # Ordered list — index 0 = migration 1, index N-1 = migration N
 MIGRATIONS: list[Callable[[Engine], None]] = [
     _migration_1,
     _migration_2,
     _migration_3,
+    _migration_4,
 ]
 
 

@@ -281,6 +281,7 @@ class TestChatSSE:
         assert "Exception" in error_events[0]["detail"]
         # Must no longer be the old opaque message
         assert error_events[0]["content"] != "An internal error occurred."
+        assert events[-1]["type"] == "done"
 
     async def test_timeout_yields_error_event(self, monkeypatch):
         """When the graph exceeds the timeout, client receives a timeout error."""
@@ -297,6 +298,7 @@ class TestChatSSE:
         error_events = [e for e in events if e["type"] == "error"]
         assert len(error_events) == 1
         assert "timed out" in error_events[0]["content"].lower()
+        assert events[-1]["type"] == "done"
 
     async def test_kg_upsert_skipped_when_no_tool_results(self):
         """When no tool results accumulate, upsert_from_tool_results is not called."""
@@ -472,6 +474,7 @@ class TestChunkContentNormalization:
         assert "RuntimeError" in error_events[0]["detail"]
         # Old generic message must be gone
         assert error_events[0]["content"] != "An internal error occurred."
+        assert events[-1]["type"] == "done"
 
     async def test_kg_error_emits_kg_update_with_error_field(self):
         """Issue 3: when upsert_from_tool_results raises, the endpoint emits a

@@ -47,13 +47,7 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
           }
         } else {
           if (lastGroup.type === "step") {
-            // If the same step is updating (e.g. running -> done), we just update it in place.
-            const existingIdx = lastGroup.steps.findIndex(s => s.stepId === item.step.stepId);
-            if (existingIdx >= 0) {
-              lastGroup.steps[existingIdx] = item.step;
-            } else {
-              lastGroup.steps.push(item.step);
-            }
+            lastGroup.steps.push(item.step);
           } else {
             groupedItems.push({ type: "step", steps: [item.step], key: item.key });
           }

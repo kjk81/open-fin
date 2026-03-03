@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _ollama_sem: asyncio.Semaphore | None = None
 _cloud_sem: asyncio.Semaphore | None = None
 _chat_active: asyncio.Event | None = None  # *cleared* when chat is idle
+_queue_mode: str | None = None
 
 
 def init_queue(mode: str) -> None:
@@ -41,7 +42,9 @@ def init_queue(mode: str) -> None:
     Args:
         mode: ``"ollama"`` (Semaphore(1)) or ``"cloud"`` (Semaphore(10)).
     """
-    global _ollama_sem, _cloud_sem, _chat_active
+    global _ollama_sem, _cloud_sem, _chat_active, _queue_mode
+
+    _queue_mode = (mode or "ollama").lower()
 
     _ollama_sem = asyncio.Semaphore(1)
     _cloud_sem = asyncio.Semaphore(10)
@@ -49,7 +52,7 @@ def init_queue(mode: str) -> None:
     _chat_active = asyncio.Event()
     _chat_active.set()  # start idle
 
-    logger.info("Ollama queue initialised (mode=%s)", mode)
+    logger.info("Ollama queue initialised (mode=%s)", _queue_mode)
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +69,11 @@ async def ollama_chat_slot() -> AsyncIterator[None]:
     """
     if _ollama_sem is None or _chat_active is None:
         # Queue not initialised — pass through (tests / import time)
+        yield
+        return
+
+    if _queue_mode != "ollama":
+        # Cloud / non-ollama modes should not serialize requests.
         yield
         return
 
@@ -94,6 +102,11 @@ async def ollama_analysis_slot(timeout: float = 120.0) -> AsyncIterator[str]:
         yield "immediate"
         return
 
+    if _queue_mode != "ollama":
+        # Cloud / non-ollama modes should not wait on chat or semaphore.
+        yield "immediate"
+        return
+
     status = "immediate"
 
     if not _chat_active.is_set():
@@ -110,6 +123,6 @@ async def ollama_analysis_slot(timeout: float = 120.0) -> AsyncIterator[str]:
 
 def is_chat_active() -> bool:
     """Return True if a chat stream currently holds the slot."""
-    if _chat_active is None:
+    if _chat_active is None or _queue_mode != "ollama":
         return False
     return not _chat_active.is_set()

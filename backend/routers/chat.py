@@ -459,6 +459,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "content": "The request timed out. Please try again.",
             "detail": f"TimeoutError: Graph stream exceeded {GRAPH_STREAM_TIMEOUT}s",
         })
+        yield emit({"type": "done"})
     except RuntimeError as exc:
         # FallbackLLM raises RuntimeError with a user-actionable message when
         # no provider is configured or all providers fail. Surface it directly.
@@ -476,6 +477,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "content": str(exc),
             "detail": f"RuntimeError: {exc}",
         })
+        yield emit({"type": "done"})
     except Exception as exc:
         logger.error("Chat stream error: %s", exc, exc_info=True)
         yield emit({
@@ -491,6 +493,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             "content": f"An error occurred ({type(exc).__name__}). Check the terminal for details.",
             "detail": f"{type(exc).__name__}: {exc}",
         })
+        yield emit({"type": "done"})
 
 
 @router.post("/chat")

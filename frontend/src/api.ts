@@ -24,6 +24,9 @@ import type {
   AgentMode,
   DashboardMetrics,
   TickerEventItem,
+  TickerNote,
+  PaginatedTickerNotes,
+  GraphConnectionsSummary,
 } from "./types";
 
 // Mutable base URL — updated by initApiBase() before the React tree renders.
@@ -100,6 +103,39 @@ export async function fetchTickerEvents(symbol: string): Promise<TickerEventItem
   const res = await fetch(`${API}/api/ticker/${encodeURIComponent(symbol)}/events`);
   if (!res.ok) throw new Error(`Ticker events fetch failed: ${res.status}`);
   return res.json();
+}
+
+export async function fetchTickerNotes(
+  symbol: string,
+  offset = 0,
+  limit = 50,
+): Promise<PaginatedTickerNotes> {
+  const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  const res = await fetch(`${API}/api/ticker/${encodeURIComponent(symbol)}/notes?${qs}`);
+  if (!res.ok) throw new Error(`Ticker notes fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function createTickerNote(symbol: string, content: string): Promise<TickerNote> {
+  const res = await fetch(`${API}/api/ticker/${encodeURIComponent(symbol)}/notes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `Ticker note create failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteTickerNote(symbol: string, noteId: number): Promise<void> {
+  const res = await fetch(`${API}/api/ticker/${encodeURIComponent(symbol)}/notes/${noteId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`Ticker note delete failed: ${res.status}`);
+  }
 }
 
 export async function fetchPortfolio(): Promise<PortfolioPosition[]> {
@@ -201,10 +237,23 @@ export async function fetchGraphEgo(ticker: string, depth = 2): Promise<Subgraph
   return res.json();
 }
 
+export async function fetchGraphConnections(ticker: string): Promise<GraphConnectionsSummary> {
+  const qs = new URLSearchParams({ ticker });
+  const res = await fetch(`${API}/api/graph/connections?${qs}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? `Graph connections fetch failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function fetchGraphNodes(params: NodeQueryParams = {}): Promise<PaginatedNodes> {
   const qs = new URLSearchParams();
   if (params.kind) qs.set("kind", params.kind);
   if (params.search) qs.set("search", params.search);
+  if (params.sort_by) qs.set("sort_by", params.sort_by);
+  if (params.sort_dir) qs.set("sort_dir", params.sort_dir);
+  if (params.min_degree != null) qs.set("min_degree", String(params.min_degree));
   if (params.offset != null) qs.set("offset", String(params.offset));
   if (params.limit != null) qs.set("limit", String(params.limit));
   const res = await fetch(`${API}/api/graph/nodes?${qs}`);

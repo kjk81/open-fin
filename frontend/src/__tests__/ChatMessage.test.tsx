@@ -192,6 +192,96 @@ describe("ChatMessage trade block", () => {
   });
 });
 
+describe("ChatMessage timeline behavior", () => {
+  it("renders discrete step rows when the same stepId appears multiple times", () => {
+    render(
+      <ChatMessage
+        message={{
+          ...assistant(""),
+          timeline: [
+            {
+              type: "step",
+              key: "step-1",
+              step: {
+                seq: 1,
+                stepId: "fetch_quotes",
+                message: "Fetching quotes",
+                state: "running",
+                category: "tool",
+              },
+            },
+            {
+              type: "step",
+              key: "step-2",
+              step: {
+                seq: 2,
+                stepId: "fetch_quotes",
+                message: "Quotes fetched",
+                state: "done",
+                category: "tool",
+              },
+            },
+          ],
+        }}
+        isStreaming={false}
+        onReviewTrade={noop}
+      />
+    );
+
+    expect(screen.getByText("Fetching quotes")).toBeTruthy();
+    expect(screen.getByText("Quotes fetched")).toBeTruthy();
+    expect(document.querySelectorAll(".chat-step-row")).toHaveLength(2);
+  });
+
+  it("renders alternating text and step timeline entries in chronological order", () => {
+    const { container } = render(
+      <ChatMessage
+        message={{
+          ...assistant(""),
+          timeline: [
+            { type: "text", key: "text-1", content: "First text." },
+            {
+              type: "step",
+              key: "step-1",
+              step: {
+                seq: 1,
+                stepId: "s1",
+                message: "Step one running",
+                state: "running",
+                category: "stage",
+              },
+            },
+            { type: "text", key: "text-2", content: "Second text." },
+            {
+              type: "step",
+              key: "step-2",
+              step: {
+                seq: 2,
+                stepId: "s2",
+                message: "Step two done",
+                state: "done",
+                category: "stage",
+              },
+            },
+          ],
+        }}
+        isStreaming={false}
+        onReviewTrade={noop}
+      />
+    );
+
+    expect(screen.getByText("First text.")).toBeTruthy();
+    expect(screen.getByText("Second text.")).toBeTruthy();
+    expect(screen.getByText("Step one running")).toBeTruthy();
+    expect(screen.getByText("Step two done")).toBeTruthy();
+
+    const fullText = container.textContent ?? "";
+    expect(fullText.indexOf("First text.")).toBeLessThan(fullText.indexOf("Step one running"));
+    expect(fullText.indexOf("Step one running")).toBeLessThan(fullText.indexOf("Second text."));
+    expect(fullText.indexOf("Second text.")).toBeLessThan(fullText.indexOf("Step two done"));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // External links and basic GFM
 // ---------------------------------------------------------------------------

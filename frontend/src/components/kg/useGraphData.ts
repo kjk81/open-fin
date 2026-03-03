@@ -2,7 +2,7 @@ import { useRef, useState, useCallback } from "react";
 import MultiDirectedGraph from "graphology";
 import { fetchGraphSummary, fetchGraphEgo } from "../../api";
 import type { GraphSummary, SubgraphData } from "../../types";
-import { NODE_COLORS, EDGE_COLORS, degreeToSize, randomPosition, nodeLabel } from "./graphHelpers";
+import { degreeToSize, nodeLabel, getGraphThemeColors, seededPosition } from "./graphHelpers";
 
 export interface GraphDataState {
   summary: GraphSummary | null;
@@ -50,12 +50,19 @@ export function useGraphData(): GraphDataState & GraphDataActions {
 
   const mergeSubgraph = useCallback((data: SubgraphData) => {
     const G = graphRef.current;
+    const colors = getGraphThemeColors();
     for (const node of data.nodes) {
       if (!G.hasNode(node.id)) {
-        const pos = randomPosition();
+        const pos = seededPosition(node.id);
+        const nodeColor =
+          node.kind === "ticker"
+            ? colors.nodeTicker
+            : node.kind === "sector"
+              ? colors.nodeSector
+              : colors.nodeIndustry;
         G.addNode(node.id, {
           label: nodeLabel(node.id),
-          color: NODE_COLORS[node.kind] ?? "#64748b",
+          color: nodeColor,
           size: degreeToSize(node.degree ?? 0),
           x: pos.x,
           y: pos.y,
@@ -71,9 +78,15 @@ export function useGraphData(): GraphDataState & GraphDataActions {
     for (const edge of data.edges) {
       const key = `${edge.source}--${edge.target}--${edge.kind}`;
       if (!G.hasEdge(key) && G.hasNode(edge.source) && G.hasNode(edge.target)) {
+        const edgeColor =
+          edge.kind === "IN_SECTOR"
+            ? colors.edgeSector
+            : edge.kind === "IN_INDUSTRY"
+              ? colors.edgeIndustry
+              : colors.edgeCoMention;
         G.addEdgeWithKey(key, edge.source, edge.target, {
           kind: edge.kind,
-          color: EDGE_COLORS[edge.kind] ?? "#64748b40",
+          color: edgeColor,
           size: 1,
         });
       }

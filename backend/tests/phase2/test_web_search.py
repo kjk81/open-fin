@@ -77,3 +77,29 @@ class TestWebSearchErrors:
 
         assert result.success is False
         assert "API down" in (result.error or "")
+
+    async def test_fallback_provider_success_when_primary_fails(self):
+        from schemas.tool_contracts import SearchHit
+
+        with patch("tools.web._search_tavily", side_effect=RuntimeError("tavily unavailable")), \
+             patch("tools.web._search_exa") as mock_exa:
+            mock_exa.return_value = [
+                SearchHit(title="Fallback Result", url="https://exa.ai/fallback", snippet="ok", score=0.7),
+            ]
+
+            from tools.web import web_search
+            result = await web_search("test", provider="tavily")
+
+        assert result.success is True
+        assert result.data.provider == "exa"
+        assert len(result.data.hits) == 1
+
+    async def test_both_providers_fail_returns_combined_error(self):
+        with patch("tools.web._search_tavily", side_effect=RuntimeError("tavily failed")), \
+             patch("tools.web._search_exa", side_effect=RuntimeError("exa failed")):
+            from tools.web import web_search
+            result = await web_search("test", provider="tavily")
+
+        assert result.success is False
+        assert "tavily" in (result.error or "")
+        assert "exa" in (result.error or "")

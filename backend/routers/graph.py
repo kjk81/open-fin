@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -57,6 +58,54 @@ def _node_degree(db: Session, node_id: int) -> int:
         .where((KGEdge.source_id == node_id) | (KGEdge.target_id == node_id))
     )
     return cnt or 0
+
+
+def _node_connection_metrics(db: Session, node_id: int) -> dict[str, int]:
+    """Return degree and per-edge-kind counts for *node_id*."""
+    degree = _node_degree(db, node_id)
+    in_sector_count = db.scalar(
+        select(func.count())
+        .select_from(KGEdge)
+        .where(
+            ((KGEdge.source_id == node_id) | (KGEdge.target_id == node_id))
+            & (KGEdge.relationship == "IN_SECTOR")
+        )
+    ) or 0
+    in_industry_count = db.scalar(
+        select(func.count())
+        .select_from(KGEdge)
+        .where(
+            ((KGEdge.source_id == node_id) | (KGEdge.target_id == node_id))
+            & (KGEdge.relationship == "IN_INDUSTRY")
+        )
+    ) or 0
+    co_mention_count = db.scalar(
+        select(func.count())
+        .select_from(KGEdge)
+        .where(
+            ((KGEdge.source_id == node_id) | (KGEdge.target_id == node_id))
+            & (KGEdge.relationship == "CO_MENTION")
+        )
+    ) or 0
+    return {
+        "degree": degree,
+        "in_sector_count": in_sector_count,
+        "in_industry_count": in_industry_count,
+        "co_mention_count": co_mention_count,
+    }
+
+
+def _serialize_node_with_metrics(db: Session, node: KGNode) -> dict[str, Any]:
+    metrics = _node_connection_metrics(db, node.id)
+    return {
+        "id": node.name,
+        "kind": node.node_type,
+        "degree": metrics["degree"],
+        "in_sector_count": metrics["in_sector_count"],
+        "in_industry_count": metrics["in_industry_count"],
+        "co_mention_count": metrics["co_mention_count"],
+        "updated_at": node.updated_at.isoformat() if node.updated_at else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +305,9 @@ def graph_ego(
 def graph_nodes(
     kind: Literal["ticker", "sector", "industry"] | None = Query(default=None),
     search: str | None = Query(default=None, min_length=1, max_length=64),
+    sort_by: Literal["id", "kind", "degree", "updated_at"] | None = Query(default=None),
+    sort_dir: Literal["asc", "desc"] = Query(default="desc"),
+    min_degree: int = Query(default=0, ge=0),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -283,18 +335,23 @@ def graph_nodes(
         # Preserve FAISS relevance order
         id_to_node = {n.id: n for n in nodes}
         ordered = [id_to_node[nid] for nid in node_ids if nid in id_to_node]
-        page = ordered[offset : offset + limit]
+
+        items = [_serialize_node_with_metrics(db, n) for n in ordered]
+        if min_degree > 0:
+            items = [item for item in items if item["degree"] >= min_degree]
+
+        if sort_by:
+            reverse = sort_dir == "desc"
+            if sort_by in ("id", "kind", "updated_at"):
+                items.sort(key=lambda item: item.get(sort_by) or "", reverse=reverse)
+            else:
+                items.sort(key=lambda item: int(item.get("degree") or 0), reverse=reverse)
+
+        page = items[offset : offset + limit]
 
         return {
-            "total": len(ordered),
-            "items": [
-                {
-                    "id": n.name,
-                    "kind": n.node_type,
-                    "updated_at": n.updated_at.isoformat() if n.updated_at else None,
-                }
-                for n in page
-            ],
+            "total": len(items),
+            "items": page,
         }
 
     # --- SQL fallback ---
@@ -304,6 +361,39 @@ def graph_nodes(
     if search:
         base_q = base_q.where(KGNode.name.ilike(f"%{search}%"))
 
+    if min_degree > 0:
+        degree_expr = (
+            select(func.count())
+            .select_from(KGEdge)
+            .where((KGEdge.source_id == KGNode.id) | (KGEdge.target_id == KGNode.id))
+            .correlate(KGNode)
+            .scalar_subquery()
+        )
+        base_q = base_q.where(degree_expr >= min_degree)
+
+    if sort_by == "id":
+        order_expr = KGNode.name
+    elif sort_by == "kind":
+        order_expr = KGNode.node_type
+    elif sort_by == "updated_at":
+        order_expr = KGNode.updated_at
+    elif sort_by == "degree":
+        order_expr = (
+            select(func.count())
+            .select_from(KGEdge)
+            .where((KGEdge.source_id == KGNode.id) | (KGEdge.target_id == KGNode.id))
+            .correlate(KGNode)
+            .scalar_subquery()
+        )
+    else:
+        order_expr = None
+
+    if order_expr is not None:
+        if sort_dir == "asc":
+            base_q = base_q.order_by(order_expr.asc())
+        else:
+            base_q = base_q.order_by(order_expr.desc())
+
     total: int = db.scalar(
         select(func.count()).select_from(base_q.subquery())
     ) or 0
@@ -311,14 +401,78 @@ def graph_nodes(
 
     return {
         "total": total,
-        "items": [
+        "items": [_serialize_node_with_metrics(db, n) for n in nodes],
+    }
+
+
+@router.get("/graph/connections")
+def graph_connections(
+    ticker: str,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return consolidated connection stats and adjacent neighbors for a ticker."""
+    ticker = ticker.upper().strip()
+    if not TICKER_RE.match(ticker):
+        raise HTTPException(status_code=422, detail="Invalid ticker format.")
+
+    center: KGNode | None = db.execute(
+        select(KGNode).where(KGNode.name == ticker, KGNode.is_deleted == False)
+    ).scalar_one_or_none()
+    if center is None:
+        raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
+
+    adjacent_edges: list[KGEdge] = (
+        db.execute(
+            select(KGEdge).where(
+                (KGEdge.source_id == center.id) | (KGEdge.target_id == center.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    if not adjacent_edges:
+        return {
+            "ticker": ticker,
+            "total_connections": 0,
+            "by_kind": {},
+            "neighbors": [],
+        }
+
+    neighbor_ids = {
+        e.target_id if e.source_id == center.id else e.source_id
+        for e in adjacent_edges
+    }
+    neighbors = {
+        n.id: n
+        for n in db.execute(
+            select(KGNode).where(KGNode.id.in_(neighbor_ids), KGNode.is_deleted == False)
+        )
+        .scalars()
+        .all()
+    }
+
+    by_kind_counter = Counter(e.relationship for e in adjacent_edges)
+    neighbor_items: list[dict[str, Any]] = []
+    for e in adjacent_edges:
+        neighbor_id = e.target_id if e.source_id == center.id else e.source_id
+        neighbor = neighbors.get(neighbor_id)
+        if neighbor is None:
+            continue
+        neighbor_items.append(
             {
-                "id": n.name,
-                "kind": n.node_type,
-                "updated_at": n.updated_at.isoformat() if n.updated_at else None,
+                "name": neighbor.name,
+                "kind": neighbor.node_type,
+                "edge_kind": e.relationship,
+                "weight": e.weight,
             }
-            for n in nodes
-        ],
+        )
+
+    return {
+        "ticker": ticker,
+        "total_connections": len(neighbor_items),
+        "by_kind": dict(by_kind_counter),
+        "neighbors": neighbor_items,
     }
 
 

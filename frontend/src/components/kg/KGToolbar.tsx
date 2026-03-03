@@ -8,8 +8,8 @@ interface KGToolbarProps {
   onViewChange: (v: KGView) => void;
   search: string;
   onSearchChange: (s: string) => void;
-  kindFilter: NodeKind | "";
-  onKindFilterChange: (k: NodeKind | "") => void;
+  visibleKinds: NodeKind[];
+  onToggleKind: (kind: NodeKind) => void;
   lowResourceMode: boolean;
   onLowResourceModeChange: (v: boolean) => void;
   summary: GraphSummary | null;
@@ -22,8 +22,8 @@ export function KGToolbar({
   onViewChange,
   search,
   onSearchChange,
-  kindFilter,
-  onKindFilterChange,
+  visibleKinds,
+  onToggleKind,
   lowResourceMode,
   onLowResourceModeChange,
   summary,
@@ -56,18 +56,24 @@ export function KGToolbar({
 
       <div className="kg-toolbar-sep" />
 
-      {/* Kind filter */}
+      {/* Node type visibility toggles */}
       <div className="kg-toolbar-group">
-        <select
-          className="kg-select"
-          value={kindFilter}
-          onChange={(e) => onKindFilterChange(e.target.value as NodeKind | "")}
-        >
-          <option value="">All types</option>
-          <option value="ticker">Tickers</option>
-          <option value="sector">Sectors</option>
-          <option value="industry">Industries</option>
-        </select>
+        <div className="kg-kind-toggles" role="group" aria-label="Visible node types">
+          {([
+            ["ticker", "Tickers"],
+            ["sector", "Sectors"],
+            ["industry", "Industries"],
+          ] as const).map(([kind, label]) => (
+            <label key={kind} className="kg-kind-toggle">
+              <input
+                type="checkbox"
+                checked={visibleKinds.includes(kind)}
+                onChange={() => onToggleKind(kind)}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
       </div>
 
       <div className="kg-toolbar-sep" />

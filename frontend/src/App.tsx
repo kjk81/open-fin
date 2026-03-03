@@ -150,9 +150,21 @@ function Layout() {
           )}
         </>
       ) : activeTab === "kg" ? (
-        <ErrorBoundary label="Knowledge Graph">
-          <KnowledgeGraphExplorer />
-        </ErrorBoundary>
+        <>
+          <ErrorBoundary label="Knowledge Graph">
+            <div className="kg-tab-layout">
+              <KnowledgeGraphExplorer />
+              <ErrorBoundary label="Ticker Dashboard">
+                {state.viewMode === "dashboard" ? <Dashboard /> : <TickerDashboard />}
+              </ErrorBoundary>
+            </div>
+          </ErrorBoundary>
+          {state.terminalOpen && (
+            <div style={{ gridColumn: "1 / -1" }}>
+              <AgentTerminal />
+            </div>
+          )}
+        </>
       ) : activeTab === "settings" ? (
         <SettingsPage onBack={() => setActiveTab("copilot")} />
       ) : (

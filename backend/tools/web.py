@@ -210,14 +210,42 @@ async def web_search(
 
     try:
         if provider == "tavily":
-            hits = await _search_tavily(query, max_results)
+            provider_order = ["tavily", "exa"]
         elif provider == "exa":
-            hits = await _search_exa(query, max_results)
+            provider_order = ["exa", "tavily"]
         else:
             raise ValueError(f"Unknown provider: {provider!r}. Use 'tavily' or 'exa'.")
 
+        attempted_errors: dict[str, str] = {}
+        actual_provider: str | None = None
+        hits: list[SearchHit] = []
+
+        for attempt_provider in provider_order:
+            try:
+                if attempt_provider == "tavily":
+                    hits = await _search_tavily(query, max_results)
+                else:
+                    hits = await _search_exa(query, max_results)
+                actual_provider = attempt_provider
+                break
+            except Exception as exc:
+                attempted_errors[attempt_provider] = str(exc)
+                logger.warning(
+                    "web_search provider failed (provider=%s, query=%r): %s",
+                    attempt_provider,
+                    query,
+                    exc,
+                )
+
+        if actual_provider is None:
+            error_text = "; ".join(
+                f"{name}: {attempted_errors.get(name, 'not attempted')}"
+                for name in provider_order
+            )
+            raise RuntimeError(f"All providers failed ({error_text})")
+
         ended_at = now_utc()
-        result_data = WebSearchResult(query=query, hits=hits, provider=provider)
+        result_data = WebSearchResult(query=query, hits=hits, provider=actual_provider)
         sources = [
             SourceRef(url=h.url, title=h.title, fetched_at=ended_at)
             for h in hits

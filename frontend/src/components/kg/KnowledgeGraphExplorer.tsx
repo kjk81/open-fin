@@ -13,10 +13,11 @@ import type { NodeKind } from "../../types";
 export function KnowledgeGraphExplorer() {
   const [view, setView] = useState<KGView>("network");
   const [search, setSearch] = useState("");
-  const [kindFilter, setKindFilter] = useState<NodeKind | "">("");
+  const [visibleKinds, setVisibleKinds] = useState<NodeKind[]>(["ticker", "sector", "industry"]);
   const [lowResourceMode, setLowResourceMode] = useState(false);
   const [focusNode, setFocusNode] = useState<string | null>(null);
   const [nodeCount, setNodeCount] = useState(0);
+  const [layoutRunId, setLayoutRunId] = useState(0);
 
   const {
     graphRef,
@@ -25,12 +26,13 @@ export function KnowledgeGraphExplorer() {
     summaryError,
     egoLoading,
     egoError,
+    loadedTickers,
     loadSummary,
     loadEgo,
     resetGraph,
   } = useGraphData();
 
-  const { state: appState } = useAppContext();
+  const { state: appState, selectTicker } = useAppContext();
 
   // Load summary on mount
   useEffect(() => {
@@ -48,6 +50,7 @@ export function KnowledgeGraphExplorer() {
     async (ticker: string, depth = 2) => {
       await loadEgo(ticker, depth);
       refreshNodeCount();
+      setLayoutRunId((v) => v + 1);
       // Switch to network view and focus on the expanded node
       setView("network");
       setFocusNode(ticker.toUpperCase());
@@ -65,20 +68,45 @@ export function KnowledgeGraphExplorer() {
     }
   }, [appState.kgLastUpdated, loadSummary, handleLoadEgo]);
 
+  useEffect(() => {
+    if (!summary || summary.node_count <= 0) return;
+    if (graphRef.current.order > 0 || loadedTickers.size > 0) return;
+
+    const initialTicker = summary.communities
+      .flatMap((community) => community.members)
+      .find((member) => /^[A-Z0-9][A-Z0-9.\-]{0,14}$/.test(member));
+
+    if (initialTicker) {
+      handleLoadEgo(initialTicker, 1);
+    }
+  }, [summary, graphRef, loadedTickers, handleLoadEgo]);
+
+  const toggleKind = useCallback((kind: NodeKind) => {
+    setVisibleKinds((prev) => {
+      if (prev.includes(kind)) {
+        if (prev.length === 1) return prev;
+        return prev.filter((k) => k !== kind);
+      }
+      return [...prev, kind];
+    });
+  }, []);
+
   const handleNodeClick = useCallback(
     (nodeId: string) => {
       // Clicking a ticker node expands its ego (depth 1 for performance)
       const kind = graphRef.current.getNodeAttribute(nodeId, "kind");
       if (kind === "ticker") {
+        selectTicker(nodeId);
         handleLoadEgo(nodeId, 1);
       }
     },
-    [graphRef, handleLoadEgo],
+    [graphRef, handleLoadEgo, selectTicker],
   );
 
   const handleReset = useCallback(() => {
     resetGraph();
     setNodeCount(0);
+    setLayoutRunId(0);
     setFocusNode(null);
   }, [resetGraph]);
 
@@ -89,8 +117,8 @@ export function KnowledgeGraphExplorer() {
         onViewChange={setView}
         search={search}
         onSearchChange={setSearch}
-        kindFilter={kindFilter}
-        onKindFilterChange={setKindFilter}
+        visibleKinds={visibleKinds}
+        onToggleKind={toggleKind}
         lowResourceMode={lowResourceMode}
         onLowResourceModeChange={setLowResourceMode}
         summary={summary}
@@ -118,16 +146,18 @@ export function KnowledgeGraphExplorer() {
           <KGNetworkView
             graphRef={graphRef}
             search={search}
-            kindFilter={kindFilter}
+            visibleKinds={visibleKinds}
             lowResourceMode={lowResourceMode}
             nodeCount={nodeCount}
             focusNode={focusNode}
+            layoutRunId={layoutRunId}
             onNodeClick={handleNodeClick}
           />
         ) : (
           <KGTableView
             search={search}
-            kindFilter={kindFilter}
+            visibleKinds={visibleKinds}
+            onSelectTicker={selectTicker}
             onExpandEgo={(ticker) => {
               handleLoadEgo(ticker, 2);
               setView("network");

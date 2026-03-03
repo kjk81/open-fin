@@ -42,6 +42,15 @@ class Watchlist(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class TickerNote(Base):
+    __tablename__ = "ticker_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(20), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class LLMSettings(Base):
     __tablename__ = "llm_settings"
 

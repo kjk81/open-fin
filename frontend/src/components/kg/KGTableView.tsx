@@ -1,15 +1,14 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   useReactTable,
   getCoreRowModel,
-  getSortedRowModel,
   flexRender,
   createColumnHelper,
   type SortingState,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { fetchGraphNodes, fetchGraphEdges } from "../../api";
-import type { GraphNode, GraphEdge, NodeKind, EdgeKind } from "../../types";
+import type { GraphNode, GraphEdge, NodeKind, EdgeKind, NodeQueryParams } from "../../types";
 
 // ── Node columns ─────────────────────────────────────────────────────────────
 
@@ -36,6 +35,24 @@ const nodeColumns = [
     header: "Degree",
     cell: (info) => info.getValue(),
     size: 80,
+  }),
+  nodeHelper.accessor((row) => row.in_sector_count ?? 0, {
+    id: "in_sector_count",
+    header: "IN_SECTOR",
+    cell: (info) => info.getValue(),
+    size: 90,
+  }),
+  nodeHelper.accessor((row) => row.in_industry_count ?? 0, {
+    id: "in_industry_count",
+    header: "IN_INDUSTRY",
+    cell: (info) => info.getValue(),
+    size: 100,
+  }),
+  nodeHelper.accessor((row) => row.co_mention_count ?? 0, {
+    id: "co_mention_count",
+    header: "CO_MENTION",
+    cell: (info) => info.getValue(),
+    size: 98,
   }),
   nodeHelper.accessor("updated_at", {
     header: "Updated",
@@ -75,40 +92,82 @@ const edgeColumns = [
     ),
     size: 180,
   }),
+  edgeHelper.accessor((row) => row.weight ?? 0, {
+    id: "weight",
+    header: "Weight",
+    cell: (info) => info.getValue(),
+    size: 88,
+  }),
 ];
 
 // ── Node table ────────────────────────────────────────────────────────────────
 
 interface NodeTableProps {
   search: string;
-  kindFilter: NodeKind | "";
+  visibleKinds: NodeKind[];
+  onSelectTicker: (ticker: string) => void;
   onExpandEgo: (ticker: string) => void;
 }
 
-function NodeTable({ search, kindFilter, onExpandEgo }: NodeTableProps) {
+function mapSortingToQuery(sorting: SortingState): Pick<NodeQueryParams, "sort_by" | "sort_dir"> {
+  if (sorting.length === 0) return {};
+  const active = sorting[0];
+  const map: Record<string, NodeQueryParams["sort_by"]> = {
+    id: "id",
+    kind: "kind",
+    degree: "degree",
+    updated_at: "updated_at",
+  };
+  const sortBy = map[active.id];
+  if (!sortBy) return {};
+  return { sort_by: sortBy, sort_dir: active.desc ? "desc" : "asc" };
+}
+
+function NodeTable({ search, visibleKinds, onSelectTicker, onExpandEgo }: NodeTableProps) {
   const [nodes, setNodes] = useState<GraphNode[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const [sorting, setSorting] = useState<SortingState>([{ id: "degree", desc: true }]);
+  const [idContains, setIdContains] = useState("");
+  const [minDegreeInput, setMinDegreeInput] = useState("0");
+  const [kindFilter, setKindFilter] = useState<NodeKind | "">("");
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setKindFilter((prev) => (prev && !visibleKinds.includes(prev) ? "" : prev));
+  }, [visibleKinds]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      const selectedKinds = kindFilter ? [kindFilter] : visibleKinds;
+      const effectiveSearch = idContains.trim() || search || undefined;
+      const minDegree = Number.isFinite(Number(minDegreeInput)) ? Math.max(0, Number(minDegreeInput) || 0) : 0;
+      const apiKind = selectedKinds.length === 1 ? selectedKinds[0] : undefined;
+      const sortQuery = mapSortingToQuery(sorting);
+
       const result = await fetchGraphNodes({
-        kind: kindFilter || undefined,
-        search: search || undefined,
+        kind: apiKind,
+        search: effectiveSearch,
+        min_degree: minDegree,
+        ...sortQuery,
         offset: 0,
         limit: 500,
       });
-      setNodes(result.items);
-      setTotal(result.total);
+
+      const filtered = apiKind
+        ? result.items
+        : result.items.filter((item) => selectedKinds.includes(item.kind));
+
+      setNodes(filtered);
+      setTotal(apiKind ? result.total : filtered.length);
     } catch {
       setNodes([]);
+      setTotal(0);
     } finally {
       setLoading(false);
     }
-  }, [search, kindFilter]);
+  }, [sorting, kindFilter, visibleKinds, idContains, minDegreeInput, search]);
 
   useEffect(() => {
     const id = setTimeout(load, 200);
@@ -117,11 +176,11 @@ function NodeTable({ search, kindFilter, onExpandEgo }: NodeTableProps) {
 
   const table = useReactTable({
     data: nodes,
-    columns: nodeColumns,
+    columns: useMemo(() => nodeColumns, []),
     state: { sorting },
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
+    manualSorting: true,
   });
 
   const rows = table.getRowModel().rows;
@@ -143,6 +202,35 @@ function NodeTable({ search, kindFilter, onExpandEgo }: NodeTableProps) {
 
   return (
     <div className="kg-table-container">
+      <div className="kg-table-filters">
+        <input
+          className="kg-search"
+          style={{ width: 220 }}
+          placeholder="Node id contains..."
+          value={idContains}
+          onChange={(e) => setIdContains(e.target.value)}
+        />
+        <input
+          className="kg-search"
+          style={{ width: 110 }}
+          type="number"
+          min={0}
+          value={minDegreeInput}
+          onChange={(e) => setMinDegreeInput(e.target.value)}
+          placeholder="Min degree"
+        />
+        <select
+          className="kg-select"
+          value={kindFilter}
+          onChange={(e) => setKindFilter(e.target.value as NodeKind | "")}
+        >
+          <option value="">All visible types</option>
+          {visibleKinds.includes("ticker") && <option value="ticker">ticker</option>}
+          {visibleKinds.includes("sector") && <option value="sector">sector</option>}
+          {visibleKinds.includes("industry") && <option value="industry">industry</option>}
+        </select>
+      </div>
+
       {loading && (
         <div style={{ padding: "6px 14px", fontSize: 11, color: "var(--text-muted)" }}>
           Loading…
@@ -187,12 +275,20 @@ function NodeTable({ search, kindFilter, onExpandEgo }: NodeTableProps) {
                   ))}
                   <td>
                     {row.original.kind === "ticker" && (
-                      <button
-                        className="kg-table-action"
-                        onClick={() => onExpandEgo(row.original.id)}
-                      >
-                        Expand
-                      </button>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          className="kg-table-action"
+                          onClick={() => onSelectTicker(row.original.id)}
+                        >
+                          Open
+                        </button>
+                        <button
+                          className="kg-table-action"
+                          onClick={() => onExpandEgo(row.original.id)}
+                        >
+                          Expand
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -223,7 +319,6 @@ function EdgeTable({ edgeKindFilter }: EdgeTableProps) {
   const [edges, setEdges] = useState<GraphEdge[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [sorting, setSorting] = useState<SortingState>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -241,10 +336,7 @@ function EdgeTable({ edgeKindFilter }: EdgeTableProps) {
   const table = useReactTable({
     data: edges,
     columns: edgeColumns,
-    state: { sorting },
-    onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
   });
 
   const rows = table.getRowModel().rows;
@@ -331,11 +423,12 @@ type TableTab = "nodes" | "edges";
 
 interface KGTableViewProps {
   search: string;
-  kindFilter: NodeKind | "";
+  visibleKinds: NodeKind[];
+  onSelectTicker: (ticker: string) => void;
   onExpandEgo: (ticker: string) => void;
 }
 
-export function KGTableView({ search, kindFilter, onExpandEgo }: KGTableViewProps) {
+export function KGTableView({ search, visibleKinds, onSelectTicker, onExpandEgo }: KGTableViewProps) {
   const [tableTab, setTableTab] = useState<TableTab>("nodes");
   const [edgeKindFilter, setEdgeKindFilter] = useState<EdgeKind | "">("");
 
@@ -371,7 +464,12 @@ export function KGTableView({ search, kindFilter, onExpandEgo }: KGTableViewProp
       </div>
 
       {tableTab === "nodes" ? (
-        <NodeTable search={search} kindFilter={kindFilter} onExpandEgo={onExpandEgo} />
+        <NodeTable
+          search={search}
+          visibleKinds={visibleKinds}
+          onSelectTicker={onSelectTicker}
+          onExpandEgo={onExpandEgo}
+        />
       ) : (
         <EdgeTable edgeKindFilter={edgeKindFilter} />
       )}

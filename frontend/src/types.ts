@@ -155,6 +155,9 @@ export interface GraphNode {
   id: string;
   kind: NodeKind;
   degree: number;
+  in_sector_count?: number;
+  in_industry_count?: number;
+  co_mention_count?: number;
   updated_at?: string;
 }
 
@@ -162,6 +165,7 @@ export interface GraphEdge {
   source: string;
   target: string;
   kind: EdgeKind;
+  weight?: number;
 }
 
 export interface SubgraphData {
@@ -195,8 +199,37 @@ export interface PaginatedEdges {
 export interface NodeQueryParams {
   kind?: NodeKind;
   search?: string;
+  sort_by?: "id" | "kind" | "degree" | "updated_at";
+  sort_dir?: "asc" | "desc";
+  min_degree?: number;
   offset?: number;
   limit?: number;
+}
+
+export interface TickerNote {
+  id: number;
+  ticker: string;
+  content: string;
+  created_at: string | null;
+}
+
+export interface PaginatedTickerNotes {
+  total: number;
+  items: TickerNote[];
+}
+
+export interface GraphConnectionNeighbor {
+  name: string;
+  kind: NodeKind;
+  edge_kind: EdgeKind;
+  weight: number;
+}
+
+export interface GraphConnectionsSummary {
+  ticker: string;
+  total_connections: number;
+  by_kind: Partial<Record<EdgeKind, number>>;
+  neighbors: GraphConnectionNeighbor[];
 }
 
 export interface EdgeQueryParams {

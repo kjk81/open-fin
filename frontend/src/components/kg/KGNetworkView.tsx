@@ -4,9 +4,7 @@ import { useWorkerLayoutForceAtlas2 } from "@react-sigma/layout-forceatlas2";
 import type MultiDirectedGraph from "graphology";
 import type { NodeKind } from "../../types";
 import {
-  NODE_COLORS,
-  NODE_COLORS_DIM,
-  EDGE_COLORS,
+  getGraphThemeColors,
   LOD_EDGE_HIDE_RATIO,
   LOD_LABEL_SIZE_THRESHOLD,
 } from "./graphHelpers";
@@ -18,28 +16,29 @@ import { ErrorBoundary } from "../ErrorBoundary";
 
 interface FA2ControllerProps {
   lowResourceMode: boolean;
-  shouldRun: boolean;
+  runId: number;
 }
 
-function FA2Controller({ lowResourceMode, shouldRun }: FA2ControllerProps) {
+function FA2Controller({ lowResourceMode, runId }: FA2ControllerProps) {
   const { start, stop, kill } = useWorkerLayoutForceAtlas2({
     settings: {
-      gravity: 1,
-      scalingRatio: 2,
-      slowDown: 8,
+      gravity: 0.8,
+      scalingRatio: 1.7,
+      slowDown: lowResourceMode ? 12 : 10,
       barnesHutOptimize: true,
     },
   });
 
   useEffect(() => {
-    if (!shouldRun) return;
+    if (runId <= 0) return;
     start();
-    if (lowResourceMode) {
-      const t = setTimeout(() => stop(), 3000);
-      return () => { clearTimeout(t); stop(); };
-    }
-    return () => stop();
-  }, [shouldRun, lowResourceMode, start, stop]);
+    const stabilizationMs = lowResourceMode ? 1800 : 6000;
+    const t = window.setTimeout(() => stop(), stabilizationMs);
+    return () => {
+      window.clearTimeout(t);
+      stop();
+    };
+  }, [runId, lowResourceMode, start, stop]);
 
   // Kill worker on unmount
   useEffect(() => () => { kill(); }, [kill]);
@@ -51,11 +50,12 @@ function FA2Controller({ lowResourceMode, shouldRun }: FA2ControllerProps) {
 
 interface EventHandlerProps {
   search: string;
-  kindFilter: NodeKind | "";
+  visibleKinds: NodeKind[];
+  lowResourceMode: boolean;
   onNodeClick: (nodeId: string) => void;
 }
 
-function GraphEventHandlers({ search, kindFilter, onNodeClick }: EventHandlerProps) {
+function GraphEventHandlers({ search, visibleKinds, lowResourceMode, onNodeClick }: EventHandlerProps) {
   const sigma = useSigma();
   const registerEvents = useRegisterEvents();
   const searchFocusTimer = useRef<number | null>(null);
@@ -71,25 +71,21 @@ function GraphEventHandlers({ search, kindFilter, onNodeClick }: EventHandlerPro
       // In low-resource / zoomed-out mode, cap label size to avoid rendering thousands
       const displayData = { ...data };
 
-      // Kind filter dim
-      if (kindFilter && data["kind"] !== kindFilter) {
-        displayData["color"] = NODE_COLORS_DIM;
-        displayData["label"] = null;
-        displayData["zIndex"] = 0;
+      // Type hide (not dim): hidden when toggle is off
+      if (!visibleKinds.includes(data["kind"] as NodeKind)) {
+        displayData["hidden"] = true;
         return displayData;
       }
 
       // Search dim
       if (searchUpper && !node.toUpperCase().includes(searchUpper)) {
-        displayData["color"] = NODE_COLORS_DIM;
-        displayData["label"] = null;
-        displayData["zIndex"] = 0;
+        displayData["hidden"] = true;
         return displayData;
       }
 
       // LOD: hide labels when zoomed out
       const renderedSize = (data["size"] as number) / ratio;
-      if (renderedSize < LOD_LABEL_SIZE_THRESHOLD) {
+      if (renderedSize < (lowResourceMode ? LOD_LABEL_SIZE_THRESHOLD + 2 : LOD_LABEL_SIZE_THRESHOLD)) {
         displayData["label"] = null;
       }
 
@@ -106,7 +102,7 @@ function GraphEventHandlers({ search, kindFilter, onNodeClick }: EventHandlerPro
     });
 
     sigma.refresh();
-  }, [sigma, search, kindFilter]);
+  }, [sigma, search, visibleKinds, lowResourceMode]);
 
   // Search focus: dim non-matches via reducer and focus camera on matching neighborhood.
   useEffect(() => {
@@ -210,36 +206,41 @@ function CameraFocus({ focusNode }: CameraFocusProps) {
 interface KGNetworkViewProps {
   graphRef: React.MutableRefObject<MultiDirectedGraph>;
   search: string;
-  kindFilter: NodeKind | "";
+  visibleKinds: NodeKind[];
   lowResourceMode: boolean;
   nodeCount: number;
   focusNode: string | null;
+  layoutRunId: number;
   onNodeClick: (nodeId: string) => void;
 }
 
 export function KGNetworkView({
   graphRef,
   search,
-  kindFilter,
+  visibleKinds,
   lowResourceMode,
   nodeCount,
   focusNode,
+  layoutRunId,
   onNodeClick,
 }: KGNetworkViewProps) {
   const hasNodes = nodeCount > 0;
+  const colors = getGraphThemeColors();
 
   const sigmaSettings = {
     renderLabels: true,
     labelSize: 12,
     labelWeight: "600",
-    labelColor: { color: "#e2e8f0" },
+    labelColor: { color: colors.label },
     edgeLabelSize: 10,
+    labelDensity: lowResourceMode ? 0.02 : 0.08,
+    labelGridCellSize: lowResourceMode ? 160 : 90,
     labelRenderedSizeThreshold: lowResourceMode ? 14 : 8,
     hideEdgesOnMove: lowResourceMode,
     renderEdgeLabels: !lowResourceMode,
     zIndex: !lowResourceMode,
-    defaultNodeColor: NODE_COLORS["ticker"],
-    defaultEdgeColor: EDGE_COLORS["CO_MENTION"],
+    defaultNodeColor: colors.nodeTicker,
+    defaultEdgeColor: colors.edgeCoMention,
     // Node programs (default: filled circle — fast WebGL)
     allowInvalidContainer: true,
   };
@@ -266,12 +267,13 @@ export function KGNetworkView({
       <SigmaContainer
         graph={graphRef.current}
         settings={sigmaSettings}
-        style={{ width: "100%", height: "100%", background: "#0f172a" }}
+        style={{ width: "100%", height: "100%", background: colors.background }}
       >
-        <FA2Controller lowResourceMode={lowResourceMode} shouldRun={hasNodes} />
+        <FA2Controller lowResourceMode={lowResourceMode} runId={layoutRunId} />
         <GraphEventHandlers
           search={search}
-          kindFilter={kindFilter}
+          visibleKinds={visibleKinds}
+          lowResourceMode={lowResourceMode}
           onNodeClick={handleNodeClick}
         />
         <CameraFocus focusNode={focusNode} />

@@ -181,6 +181,25 @@ class TestRunMigrations:
         _migration_1(eng)  # first run
         _migration_1(eng)  # second run — must be no-op
 
+    def test_migration_4_creates_ticker_notes_table_and_indexes_idempotent(self):
+        """Migration 4 must create ticker_notes + indexes and be safe to re-run."""
+        from migrations import _migration_4
+
+        eng = _make_engine()
+
+        with eng.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS ticker_notes"))
+
+        _migration_4(eng)
+        _migration_4(eng)
+
+        insp = inspect(eng)
+        assert "ticker_notes" in insp.get_table_names()
+
+        idx_names = {idx["name"] for idx in insp.get_indexes("ticker_notes")}
+        assert "ix_ticker_notes_ticker" in idx_names
+        assert "ix_ticker_notes_created_at" in idx_names
+
     def test_fails_on_newer_version(self):
         """If stored version > CURRENT_SCHEMA_VERSION, return (False, str)."""
         from migrations import run_migrations, set_version, CURRENT_SCHEMA_VERSION
