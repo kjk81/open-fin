@@ -411,7 +411,7 @@ async def get_company_profile(symbol: str) -> ToolResult[FMPCompanyProfile]:
 
     try:
         async with FmpClient() as fmp:
-            data = await fmp.get(f"/profile/{symbol.upper()}")
+            data = await fmp.get(f"/profile?symbol={symbol.upper()}")
 
         items = data if isinstance(data, list) else [data]
         if not items:
@@ -496,7 +496,7 @@ async def get_financial_statements(
     try:
         async with FmpClient() as fmp:
             data = await fmp.get(
-                f"/income-statement/{symbol.upper()}",
+                f"/income-statement?symbol={symbol.upper()}",
                 params={"period": period, "limit": limit},
             )
 
@@ -594,7 +594,7 @@ async def get_balance_sheet(
     try:
         async with FmpClient() as fmp:
             data = await fmp.get(
-                f"/balance-sheet-statement/{symbol.upper()}",
+                f"/balance-sheet-statement?symbol={symbol.upper()}",
                 params={"period": period, "limit": limit},
             )
 
@@ -757,7 +757,7 @@ async def get_peers(symbol: str) -> ToolResult[PeerComparison]:
 
     try:
         async with FmpClient() as fmp:
-            data = await fmp.get("/stock_peers", params={"symbol": symbol.upper()})
+            data = await fmp.get("/stock-peers", params={"symbol": symbol.upper()})
 
         items = data if isinstance(data, list) else [data]
         peers_list: list[str] = []

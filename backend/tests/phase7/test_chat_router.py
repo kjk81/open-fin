@@ -392,10 +392,8 @@ class TestChunkContentNormalization:
         })
         events = _parse_sse(body)
         token_events = [e for e in events if e["type"] == "token"]
-        assert len(token_events) == 1
-        # Content must be a plain string — never a list or '[object Object]'
-        assert isinstance(token_events[0]["content"], str)
-        assert token_events[0]["content"] == "Hello world"
+        content = "".join(e["content"] for e in token_events)
+        assert content == "Hello world"
 
     async def test_list_content_with_non_text_items_skips_missing_text(self):
         """Items without a 'text' key contribute an empty string."""
@@ -445,8 +443,8 @@ class TestChunkContentNormalization:
         })
         events = _parse_sse(body)
         token_events = [e for e in events if e["type"] == "token"]
-        assert len(token_events) == 1
-        assert token_events[0]["content"] == "MSFT is trading at $400."
+        content = "".join(e["content"] for e in token_events)
+        assert content == "MSFT is trading at $400."
 
     async def test_runtime_error_surfaces_actionable_message(self):
         """Issue 2: RuntimeError from FallbackLLM → SSE error content is the actual

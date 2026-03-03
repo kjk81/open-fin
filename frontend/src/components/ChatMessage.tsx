@@ -1,4 +1,4 @@
-import type { AnchorHTMLAttributes, ClassAttributes } from "react";
+import React, { type AnchorHTMLAttributes, type ClassAttributes } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useAppContext } from "../context/AppContext";
@@ -25,7 +25,76 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
   const isSystem = message.role === "system";
   const isAssistant = !isUser && !isSystem;
 
-  const parts = renderContent(message.content, selectTicker, onReviewTrade);
+  let contentArea: React.ReactNode;
+  if (message.timeline && message.timeline.length > 0) {
+    // Group contiguous sequences of 'text' together and contiguous 'step' together
+    const groupedItems: Array<{ type: "text", content: string, key: string } | { type: "step", steps: AgentStep[], key: string }> = [];
+
+    for (const item of message.timeline) {
+      if (groupedItems.length === 0) {
+        if (item.type === "text") {
+          groupedItems.push({ ...item });
+        } else {
+          groupedItems.push({ type: "step", steps: [item.step], key: item.key });
+        }
+      } else {
+        const lastGroup = groupedItems[groupedItems.length - 1];
+        if (item.type === "text") {
+          if (lastGroup.type === "text") {
+            lastGroup.content += item.content;
+          } else {
+            groupedItems.push({ ...item });
+          }
+        } else {
+          if (lastGroup.type === "step") {
+            // If the same step is updating (e.g. running -> done), we just update it in place.
+            const existingIdx = lastGroup.steps.findIndex(s => s.stepId === item.step.stepId);
+            if (existingIdx >= 0) {
+              lastGroup.steps[existingIdx] = item.step;
+            } else {
+              lastGroup.steps.push(item.step);
+            }
+          } else {
+            groupedItems.push({ type: "step", steps: [item.step], key: item.key });
+          }
+        }
+      }
+    }
+
+    contentArea = (
+      <>
+        {groupedItems.map((group) => {
+          if (group.type === "step") {
+            return (
+              <div key={group.key} className="chat-steps">
+                {group.steps.map((step) => (
+                  <StepRow key={`${step.stepId}-${step.state}`} step={step} />
+                ))}
+              </div>
+            );
+          } else {
+            const parts = renderContent(group.content, selectTicker, onReviewTrade);
+            return <React.Fragment key={group.key}>{parts}</React.Fragment>;
+          }
+        })}
+      </>
+    );
+  } else {
+    // Fallback for older messages
+    const parts = renderContent(message.content, selectTicker, onReviewTrade);
+    contentArea = (
+      <>
+        {isAssistant && message.steps && message.steps.length > 0 && (
+          <div className="chat-steps" aria-label="Agent execution steps">
+            {message.steps.map((step, index) => (
+              <StepRow key={`${step.stepId}-${index}`} step={step} />
+            ))}
+          </div>
+        )}
+        {parts}
+      </>
+    );
+  }
 
   return (
     <div className={`chat-message chat-message--${isUser ? "user" : isSystem ? "system" : "assistant"}`}>
@@ -37,10 +106,7 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
             ))}
           </div>
         )}
-        {isAssistant && message.steps && message.steps.length > 0 && (
-          <StepProgress steps={message.steps} />
-        )}
-        {parts}
+        {contentArea}
         {isStreaming && isAssistant && <span className="typing-cursor" />}
         {isAssistant && message.completionStatus === "incomplete" && (
           <div className="chat-incomplete">Response incomplete — request timed out or failed.</div>
@@ -93,24 +159,29 @@ function CitationFooter({ sources }: { sources: SourceRef[] }) {
   );
 }
 
-function StepProgress({ steps }: { steps: AgentStep[] }) {
+function StepRow({ step }: { step: AgentStep }) {
+  const isDone = step.state === "done";
+  const isRunning = step.state === "running";
+
+  // Inline icon: ✓ done, ✕ error, spinner for running
+  const indicatorClass = isRunning
+    ? "chat-step-indicator chat-step-indicator--running"
+    : isDone
+      ? "chat-step-indicator chat-step-indicator--done"
+      : "chat-step-indicator chat-step-indicator--error";
+
+  // Append duration to tool steps that completed
+  const durationSuffix =
+    isDone && step.category === "tool" && step.durationMs != null
+      ? ` (${step.durationMs}ms)`
+      : "";
+
   return (
-    <div className="chat-steps" aria-label="Agent execution steps">
-      {steps.map((step) => (
-        <div key={step.stepId} className="chat-step-row">
-          <span
-            className={
-              step.state === "running"
-                ? "chat-step-indicator chat-step-indicator--running"
-                : step.state === "done"
-                  ? "chat-step-indicator chat-step-indicator--done"
-                  : "chat-step-indicator chat-step-indicator--error"
-            }
-            aria-hidden="true"
-          />
-          <span className="chat-step-text">{step.message}</span>
-        </div>
-      ))}
+    <div className="chat-step-row">
+      <span className={indicatorClass} aria-hidden="true" />
+      <span className="chat-step-text">
+        {step.message}{durationSuffix}
+      </span>
     </div>
   );
 }
@@ -244,7 +315,10 @@ function renderContent(
     parts.push(<MarkdownSegment key={key++} segKey={key} text={segment} selectTicker={selectTicker} />);
   }
 
-  if (parts.length === 0) {
+  // Only add the fallback segment when there is actual text to render.
+  // An empty string produces a phantom <p> tag that pushes layout around
+  // while steps are rendering before the first tokens arrive.
+  if (parts.length === 0 && text.trim()) {
     parts.push(<MarkdownSegment key={key++} segKey={key} text={text} selectTicker={selectTicker} />);
   }
 

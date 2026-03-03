@@ -52,6 +52,7 @@ interface AppState {
   terminalLogs: TerminalLogEntry[];
   terminalOpen: boolean;
   kgLastUpdated: number;
+  kgLastTicker: string | null;
   debugMode: boolean;
 }
 
@@ -73,6 +74,7 @@ const initialState: AppState = {
   terminalLogs: [],
   terminalOpen: false,
   kgLastUpdated: 0,
+  kgLastTicker: null,
   debugMode: typeof localStorage !== "undefined" && localStorage.getItem("open-fin-debug-mode") === "true",
 };
 
@@ -94,6 +96,7 @@ type Action =
   | { type: "UPDATE_TOOL_EVENT"; event: ToolEvent }
   | { type: "UPDATE_AGENT_STEP"; step: AgentStep }
   | { type: "SET_LAST_ASSISTANT_STATUS"; status: "streaming" | "complete" | "incomplete" }
+  | { type: "FINALIZE_RUNNING_STEPS" }
   | { type: "SET_LAST_MESSAGE_SOURCES"; sources: SourceRef[] }
   | { type: "SET_TICKER_REPORT"; report: string }
   | { type: "APPEND_TICKER_REPORT"; content: string }
@@ -102,7 +105,7 @@ type Action =
   | { type: "APPEND_TERMINAL_LOG"; entry: TerminalLogEntry }
   | { type: "TOGGLE_TERMINAL" }
   | { type: "CLEAR_TERMINAL_LOGS" }
-  | { type: "KG_UPDATED" }
+  | { type: "KG_UPDATED"; ticker?: string }
   | { type: "SET_DEBUG_MODE"; enabled: boolean };
 
 function reducer(state: AppState, action: Action): AppState {
@@ -131,7 +134,16 @@ function reducer(state: AppState, action: Action): AppState {
       const msgs = [...state.chatMessages];
       if (msgs.length === 0) return state;
       const last = msgs[msgs.length - 1];
-      msgs[msgs.length - 1] = { ...last, content: last.content + action.content };
+      const timeline = last.timeline ? [...last.timeline] : [];
+      if (timeline.length > 0 && timeline[timeline.length - 1].type === "text") {
+        const lastItem = timeline[timeline.length - 1];
+        if (lastItem.type === "text") {
+          timeline[timeline.length - 1] = { ...lastItem, content: lastItem.content + action.content };
+        }
+      } else {
+        timeline.push({ type: "text", content: action.content, key: crypto.randomUUID() });
+      }
+      msgs[msgs.length - 1] = { ...last, content: last.content + action.content, timeline };
       return { ...state, chatMessages: msgs };
     }
     case "SET_CHAT_STREAMING":
@@ -156,18 +168,22 @@ function reducer(state: AppState, action: Action): AppState {
       const last = msgs[msgs.length - 1];
       if (last.role !== "assistant") return state;
 
-      const existing = last.steps ?? [];
-      const idxByStepId = existing.findIndex((s) => s.stepId === action.step.stepId);
-      const idxBySeq = existing.findIndex((s) => s.seq === action.step.seq && action.step.seq >= 0);
-      const idx = idxByStepId >= 0 ? idxByStepId : idxBySeq;
+      // Drop the synthetic placeholder once real backend steps start arriving.
+      const base = (last.steps ?? []).filter(
+        (s) => s.stepId !== "__init_thinking__",
+      );
 
-      const updated =
-        idx >= 0
-          ? [...existing.slice(0, idx), action.step, ...existing.slice(idx + 1)]
-          : [...existing, action.step];
+      // Always append — each event is a new sequential log line.
+      // Running and done events for the same step are distinct entries,
+      // giving a terminal-style chronological view of progress.
+      const updated = [...base, action.step];
 
-      updated.sort((a, b) => a.seq - b.seq);
-      msgs[msgs.length - 1] = { ...last, steps: updated };
+      const tlBase = (last.timeline ?? []).filter(
+        (t) => t.type !== "step" || t.step.stepId !== "__init_thinking__"
+      );
+      const updatedTimeline = [...tlBase, { type: "step" as const, step: action.step, key: crypto.randomUUID() }];
+
+      msgs[msgs.length - 1] = { ...last, steps: updated, timeline: updatedTimeline };
       return { ...state, chatMessages: msgs };
     }
     case "SET_LAST_ASSISTANT_STATUS": {
@@ -176,6 +192,26 @@ function reducer(state: AppState, action: Action): AppState {
       const last = msgs[msgs.length - 1];
       if (last.role !== "assistant") return state;
       msgs[msgs.length - 1] = { ...last, completionStatus: action.status };
+      return { ...state, chatMessages: msgs };
+    }
+    case "FINALIZE_RUNNING_STEPS": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      if (!last.steps || last.steps.length === 0) return state;
+
+      const updatedSteps = last.steps.map((step) =>
+        step.state === "running" ? { ...step, state: "done" as const } : step,
+      );
+
+      const updatedTimeline = (last.timeline ?? []).map((t) =>
+        t.type === "step" && t.step.state === "running"
+          ? { ...t, step: { ...t.step, state: "done" as const } }
+          : t
+      );
+
+      msgs[msgs.length - 1] = { ...last, steps: updatedSteps, timeline: updatedTimeline };
       return { ...state, chatMessages: msgs };
     }
     case "SET_LAST_MESSAGE_SOURCES": {
@@ -203,7 +239,7 @@ function reducer(state: AppState, action: Action): AppState {
     case "CLEAR_TERMINAL_LOGS":
       return { ...state, terminalLogs: [] };
     case "KG_UPDATED":
-      return { ...state, kgLastUpdated: Date.now() };
+      return { ...state, kgLastUpdated: Date.now(), kgLastTicker: action.ticker ?? null };
     case "SET_DEBUG_MODE":
       return { ...state, debugMode: action.enabled };
     default:
@@ -381,8 +417,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
           undefined,  // onToolEvent
           undefined,  // onSources
           () => {     // onKgUpdate — RC4 fix: ensure graph explorer refreshes
-            dispatch({ type: "KG_UPDATED" });
+            dispatch({ type: "KG_UPDATED", ticker: sym });
           },
+          undefined,  // onProgressEvent — ticker report is inline; steps not shown here
         );
       })
       .catch((err) => {
@@ -447,6 +484,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
       content: "",
       timestamp: Date.now(),
       completionStatus: "streaming",
+      // Immediately show a placeholder step so the bubble is never empty.
+      // The reducer removes it once the first real backend step arrives.
+      steps: [{
+        seq: -1,
+        stepId: "__init_thinking__",
+        message: "Analyzing your request\u2026",
+        state: "running",
+        category: "stage",
+      }],
+      timeline: [{
+        type: "step",
+        step: {
+          seq: -1,
+          stepId: "__init_thinking__",
+          message: "Analyzing your request\u2026",
+          state: "running",
+          category: "stage",
+        },
+        key: crypto.randomUUID(),
+      }],
     };
 
     dispatch({ type: "ADD_CHAT_MESSAGE", message: userMsg });
@@ -471,6 +528,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       () => {
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
         dispatch({ type: "SET_LAST_ASSISTANT_STATUS", status: "complete" });
+        dispatch({ type: "FINALIZE_RUNNING_STEPS" });
         termLog("done", "success", "Pipeline complete.");
       },
       (err, detail) => {
@@ -509,37 +567,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
       },
       (progressEvent) => {
         const msg = progressEvent.message;
-        if (progressEvent.eventType === "step") {
-          dispatch({
-            type: "UPDATE_AGENT_STEP",
-            step: {
-              seq: progressEvent.seq,
-              stepId: progressEvent.stepId ?? `seq-${progressEvent.seq}`,
-              message: msg,
-              state: progressEvent.state,
-              category: progressEvent.category ?? "tool",
-              tool: progressEvent.tool,
-              durationMs: progressEvent.durationMs,
-            },
-          });
-          const level: TerminalLogLevel =
-            progressEvent.state === "error"
-              ? "error"
-              : progressEvent.state === "done"
-                ? "success"
-                : "info";
-          termLog("step", level, msg);
-          return;
-        }
-
         const level: TerminalLogLevel =
           progressEvent.state === "error"
             ? "error"
             : progressEvent.state === "done"
               ? "success"
               : "info";
+
+        // Both "step" (tool events) and "status" (graph stage events) become
+        // visible AgentStep rows in the chat bubble. Previously, only "step"
+        // events were dispatched — "status" events (Classifying request,
+        // Planning data fetches, Synthesizing response, etc.) were silently
+        // dropped to the terminal only. That caused the "single massive
+        // response" appearance: no progress was visible until tokens arrived.
+        dispatch({
+          type: "UPDATE_AGENT_STEP",
+          step: {
+            seq: progressEvent.seq,
+            stepId: progressEvent.stepId ?? `seq-${progressEvent.seq}`,
+            message: msg,
+            state: progressEvent.state,
+            category:
+              progressEvent.category ??
+              (progressEvent.eventType === "status" ? "stage" : "tool"),
+            tool: progressEvent.tool,
+            durationMs: progressEvent.durationMs,
+          },
+        });
+
         const detail = progressEvent.phase ? `phase=${progressEvent.phase}` : undefined;
-        termLog("status", level, msg, detail);
+        termLog(
+          progressEvent.eventType === "step" ? "step" : "status",
+          level,
+          msg,
+          detail,
+        );
       },
     );
   }, [termLog, state.debugMode]);

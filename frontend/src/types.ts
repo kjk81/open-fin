@@ -24,6 +24,10 @@ export interface PortfolioPosition {
 
 export type BackendStatus = "connecting" | "running" | "migration_error" | "error";
 
+export type TimelineItem =
+  | { type: "text"; content: string; key: string }
+  | { type: "step"; step: AgentStep; key: string };
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -31,6 +35,7 @@ export interface ChatMessage {
   timestamp: number;
   toolEvents?: ToolEvent[];
   steps?: AgentStep[];
+  timeline?: TimelineItem[];
   completionStatus?: AssistantCompletionStatus;
   sources?: SourceRef[];
 }

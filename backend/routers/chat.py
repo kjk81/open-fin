@@ -118,6 +118,8 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     event_seq = 0
     tool_step_ids: dict[str, list[str]] = defaultdict(list)
     stage_step_ids: dict[str, str] = {}
+    in_think_block = False
+    think_buffer = ""
 
     def emit(data: dict[str, Any]) -> str:
         nonlocal event_seq
@@ -127,9 +129,43 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     def tool_human_label(tool_name: str) -> str:
         return tool_name.replace("_", " ")
 
+    def extract_visible_content(*, flush: bool = False) -> str:
+        nonlocal in_think_block, think_buffer
+        visible_parts: list[str] = []
+
+        while think_buffer:
+            if in_think_block:
+                close_idx = think_buffer.find("</think>")
+                if close_idx == -1:
+                    think_buffer = think_buffer[-7:]
+                    break
+                think_buffer = think_buffer[close_idx + len("</think>"):]
+                in_think_block = False
+                continue
+
+            open_idx = think_buffer.find("<think>")
+            if open_idx == -1:
+                if flush:
+                    visible_parts.append(think_buffer)
+                    think_buffer = ""
+                    break
+                safe_len = max(0, len(think_buffer) - 6)
+                if safe_len > 0:
+                    visible_parts.append(think_buffer[:safe_len])
+                    think_buffer = think_buffer[safe_len:]
+                break
+
+            if open_idx > 0:
+                visible_parts.append(think_buffer[:open_idx])
+            think_buffer = think_buffer[open_idx + len("<think>"):]
+            in_think_block = True
+
+        return "".join(visible_parts)
+
     try:
         yield emit({
             "type": "status",
+            "step_id": "stage-pipeline",
             "state": "running",
             "phase": "stream",
             "message": "Starting agent pipeline",
@@ -152,6 +188,10 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
             if evt == "on_chain_start":
                 stage_message = describe_graph_stage(name, "start")
                 if stage_message:
+                    residual = extract_visible_content(flush=True)
+                    if residual:
+                        yield emit({"type": "token", "content": residual})
+                        
                     step_id = f"stage-{name}-{event_seq + 1}"
                     stage_step_ids[name] = step_id
                     yield emit({
@@ -189,6 +229,10 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
 
                 stage_message = describe_graph_stage(name, "end")
                 if stage_message:
+                    residual = extract_visible_content(flush=True)
+                    if residual:
+                        yield emit({"type": "token", "content": residual})
+
                     step_id = stage_step_ids.pop(name, f"stage-{name}-{event_seq + 1}")
                     yield emit({
                         "type": "status",
@@ -200,6 +244,10 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     })
 
             elif evt == "on_tool_start":
+                residual = extract_visible_content(flush=True)
+                if residual:
+                    yield emit({"type": "token", "content": residual})
+
                 tool_start_times[name] = time.monotonic()
                 raw_input = data.get("input") or {}
                 tool_args_cache[name] = raw_input
@@ -214,11 +262,15 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     "category": "tool",
                     "tool": name,
                     "state": "running",
-                    "message": f"Fetching data via {tool_human_label(name)}",
+                    "message": f"Using {tool_human_label(name)}",
                 })
                 yield emit({"type": "tool_start", "tool": name, "args": args_preview})
 
             elif evt == "on_tool_end":
+                residual = extract_visible_content(flush=True)
+                if residual:
+                    yield emit({"type": "token", "content": residual})
+
                 started = tool_start_times.pop(name, time.monotonic())
                 duration_ms = int((time.monotonic() - started) * 1000)
                 success = True
@@ -281,9 +333,9 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     "state": "done" if success else "error",
                     "duration_ms": duration_ms,
                     "message": (
-                        f"Completed {tool_human_label(name)}"
+                        f"Searched {tool_human_label(name)}"
                         if success
-                        else f"{tool_human_label(name)} failed"
+                        else f"Failed using {tool_human_label(name)}"
                     ),
                 })
                 yield emit({"type": "tool_end", "tool": name, "duration_ms": duration_ms, "success": success})
@@ -303,7 +355,14 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     elif not isinstance(content, str):
                         content = str(content)
                     if content:
-                        yield emit({"type": "token", "content": content})
+                        think_buffer += content
+                        visible = extract_visible_content()
+                        if visible:
+                            yield emit({"type": "token", "content": visible})
+
+        residual = extract_visible_content(flush=True)
+        if residual:
+            yield emit({"type": "token", "content": residual})
 
         # ── Post-graph side-effects ────────────────────────────────────────
         yield emit({
@@ -324,10 +383,16 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         )
         if accumulated_tool_results:
             try:
-                kg_result = await upsert_from_tool_results(
-                    accumulated_tool_results,
-                    extra_sources=accumulated_sources,
+                kg_result = await asyncio.wait_for(
+                    upsert_from_tool_results(
+                        accumulated_tool_results,
+                        extra_sources=accumulated_sources,
+                    ),
+                    timeout=30.0,
                 )
+            except asyncio.TimeoutError:
+                logger.error("KG post-processing timed out after 30s")
+                kg_error = "Knowledge graph update timed out"
             except Exception as exc:
                 logger.error("KG post-processing error: %s", exc, exc_info=True)
                 kg_error = str(exc)
@@ -347,6 +412,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         yield emit(kg_event)
         yield emit({
             "type": "status",
+            "step_id": "stage-pipeline",
             "state": "done",
             "phase": "stream",
             "message": "Agent pipeline complete",
@@ -358,6 +424,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         logger.error("Chat stream timed out after %.0fs.", GRAPH_STREAM_TIMEOUT)
         yield emit({
             "type": "status",
+            "step_id": "stage-pipeline",
             "state": "error",
             "phase": "stream",
             "message": "Agent response incomplete due to timeout",
@@ -374,6 +441,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         logger.error("Chat stream RuntimeError: %s", exc)
         yield emit({
             "type": "status",
+            "step_id": "stage-pipeline",
             "state": "error",
             "phase": "stream",
             "message": "Agent response incomplete due to runtime failure",
@@ -388,6 +456,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         logger.error("Chat stream error: %s", exc, exc_info=True)
         yield emit({
             "type": "status",
+            "step_id": "stage-pipeline",
             "state": "error",
             "phase": "stream",
             "message": "Agent response incomplete due to unexpected error",

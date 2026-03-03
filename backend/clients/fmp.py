@@ -30,7 +30,7 @@ from clients.http_base import HttpClient, HttpClientError
 
 logger = logging.getLogger(__name__)
 
-_FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+_FMP_BASE_URL = "https://financialmodelingprep.com/stable/"
 
 
 class FMPUnavailableError(Exception):
@@ -82,7 +82,7 @@ class FmpClient:
         Parameters
         ----------
         path:
-            Endpoint path relative to the v3 base URL (e.g. ``"/profile/AAPL"``).
+            Endpoint path relative to the stable base URL (e.g. ``"/profile/AAPL"``).
         params:
             Additional query parameters dict.
 
@@ -97,11 +97,18 @@ class FmpClient:
             On 401/403 (bad key / quota exhausted), 429 (rate limit), or
             any network / transport failure.
         """
-        merged: dict[str, Any] = dict(params or {})
-        merged["apikey"] = self._api_key
+        # Normalize to a relative path so httpx joins it against the base URL
+        # correctly (RFC 3986: a leading "/" would replace the /stable segment).
+        path = path.lstrip("/")
+
+        # Inject the API key explicitly into the path so the separator is
+        # always correct: "?" when no query string exists yet, "&" when one
+        # is already embedded in the path (e.g. "profile?symbol=AAPL").
+        sep = "&" if "?" in path else "?"
+        path = f"{path}{sep}apikey={self._api_key}"
 
         try:
-            response = await self._http.get(path, params=merged)
+            response = await self._http.get(path, params=params)
         except HttpClientError as exc:
             if exc.status_code in (401, 403):
                 raise FMPUnavailableError(

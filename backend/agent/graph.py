@@ -52,14 +52,12 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 5
 
 GRAPH_STAGE_LABELS: dict[str, tuple[str, str]] = {
-    "intent_router": ("Classifying your request", "Request intent classified"),
-    "context_injector": ("Injecting portfolio and mention context", "Context injection complete"),
-    "route_finance_query": ("Planning required data fetches", "Planning step complete"),
-    "execute_tool_calls": ("Executing finance data tools", "Tool execution round complete"),
-    "force_tool_retry": ("Forcing tool usage for fresh market data", "Tool usage directive injected"),
+    "route_finance_query": ("Planning required data fetches", "Planned data fetches"),
+    "execute_tool_calls": ("Executing finance data tools", "Executed finance data tools"),
+    "force_tool_retry": ("Forcing tool usage", "Forced tool usage"),
     "fallback_tool_execution": ("Auto-fetching market data", "Market data fetched"),
-    "finalize_response": ("Synthesizing final response", "Final response generated"),
-    "generation_node": ("Generating direct response", "Direct response generated"),
+    "finalize_response": ("Synthesizing final response", "Synthesized final response"),
+    "generation_node": ("Generating direct response", "Generated direct response"),
 }
 
 _FINANCE_INTENTS: frozenset[str] = frozenset({

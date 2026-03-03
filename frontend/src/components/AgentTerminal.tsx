@@ -102,7 +102,6 @@ export const AgentTerminal = memo(function AgentTerminal() {
       <div
         ref={scrollRef}
         className="terminal-log-area"
-        style={{ scrollbarWidth: "thin", scrollbarColor: "#3f3f46 transparent" }}
       >
         {terminalLogs.length === 0 ? (
           <span className="terminal-empty">No events yet. Send a chat message to see agent logs.</span>
