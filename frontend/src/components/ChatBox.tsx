@@ -3,6 +3,7 @@ import { useAppContext } from "../context/AppContext";
 import type { AgentMode, MentionOption, TradeOrder } from "../types";
 import { ChatMessage } from "./ChatMessage";
 import { MentionPopover } from "./MentionPopover";
+import { RunExplorerModal } from "./RunExplorerModal";
 import { TradeTicket } from "./TradeTicket";
 
 const AGENT_MODES: { value: AgentMode; label: string }[] = [
@@ -46,6 +47,7 @@ export function ChatBox() {
   const [text, setText] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [tradeToReview, setTradeToReview] = useState<TradeOrder | null>(null);
+  const [exploringRunId, setExploringRunId] = useState<string | null>(null);
 
   const handleTradeSuccess = async (trade: TradeOrder, orderId: string) => {
     setTradeToReview(null);
@@ -167,6 +169,7 @@ export function ChatBox() {
             message={msg}
             isStreaming={chatStreaming && idx === chatMessages.length - 1}
             onReviewTrade={setTradeToReview}
+            onOpenRunExplorer={setExploringRunId}
           />
         ))}
         <div ref={messagesEndRef} />
@@ -222,6 +225,9 @@ export function ChatBox() {
           onClose={() => setTradeToReview(null)}
           onSuccess={handleTradeSuccess}
         />
+      )}
+      {exploringRunId && (
+        <RunExplorerModal runId={exploringRunId} onClose={() => setExploringRunId(null)} />
       )}
     </main>
   );

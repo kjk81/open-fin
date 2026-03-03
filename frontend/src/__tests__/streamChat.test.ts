@@ -330,7 +330,9 @@ describe("streamChat", () => {
     await streamChat("hi", "s1", [], vi.fn(), onDone, vi.fn(), undefined, onToolEvent);
 
     expect(onToolEvent).toHaveBeenCalledWith({
+      seq: undefined,
       tool: "get_price",
+      stepId: undefined,
       status: "running",
       args: { symbol: "AAPL" },
     });
@@ -349,9 +351,12 @@ describe("streamChat", () => {
     await streamChat("hi", "s1", [], vi.fn(), onDone, vi.fn(), undefined, onToolEvent);
 
     expect(onToolEvent).toHaveBeenCalledWith({
+      seq: undefined,
       tool: "get_price",
+      stepId: undefined,
       status: "done",
       durationMs: 350,
+      resultEnvelope: undefined,
     });
   });
 
@@ -367,9 +372,12 @@ describe("streamChat", () => {
     await streamChat("hi", "s1", [], vi.fn(), onDone, vi.fn(), undefined, onToolEvent);
 
     expect(onToolEvent).toHaveBeenCalledWith({
+      seq: undefined,
       tool: "get_price",
+      stepId: undefined,
       status: "error",
       durationMs: 100,
+      resultEnvelope: undefined,
     });
   });
 
@@ -464,6 +472,7 @@ describe("streamChat", () => {
         sseData({
           type: "status",
           seq: 3,
+          run_id: "11111111-1111-4111-8111-111111111111",
           phase: "finalize_response",
           state: "running",
           message: "Synthesizing final response",
@@ -484,6 +493,7 @@ describe("streamChat", () => {
       eventType: "step",
       state: "running",
       message: "Fetching data via get price",
+      runId: undefined,
       stepId: "tool-get_price-2",
       category: "tool",
       tool: "get_price",
@@ -496,6 +506,7 @@ describe("streamChat", () => {
       eventType: "status",
       state: "running",
       message: "Synthesizing final response",
+      runId: "11111111-1111-4111-8111-111111111111",
       stepId: undefined,
       category: undefined,
       tool: undefined,

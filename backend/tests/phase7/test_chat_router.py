@@ -235,6 +235,9 @@ class TestChatSSE:
         assert len(tool_end_events) >= 1
         assert "duration_ms" in tool_end_events[0]
         assert isinstance(tool_end_events[0]["duration_ms"], int)
+        assert isinstance(tool_end_events[0].get("step_id"), str)
+        assert isinstance(tool_end_events[0].get("result_envelope"), dict)
+        assert tool_end_events[0]["result_envelope"]["data"]["symbol"] == "AAPL"
 
     async def test_invalid_session_id_returns_422(self):
         app = self._app()

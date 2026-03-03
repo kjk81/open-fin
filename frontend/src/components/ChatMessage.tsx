@@ -1,11 +1,13 @@
-import React, { type AnchorHTMLAttributes, type ClassAttributes } from "react";
+import React, { useCallback, useMemo, useState, type AnchorHTMLAttributes, type ClassAttributes } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useAppContext } from "../context/AppContext";
+import { ToolCard } from "./ToolCard";
 import type {
   AgentStep,
   ChatMessage as ChatMessageType,
   SourceRef,
+  ToolCardMessage,
   ToolEvent,
   TradeOrder,
 } from "../types";
@@ -17,41 +19,72 @@ interface Props {
   message: ChatMessageType;
   isStreaming: boolean;
   onReviewTrade: (trade: TradeOrder) => void;
+  onOpenRunExplorer?: (runId: string) => void;
 }
 
-export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
+export function ChatMessage({ message, isStreaming, onReviewTrade, onOpenRunExplorer }: Props) {
   const { selectTicker } = useAppContext();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const isAssistant = !isUser && !isSystem;
+  const [highlightedCitation, setHighlightedCitation] = useState<number | null>(null);
+
+  const cardsByCitation = useMemo(() => {
+    const sorted = [...(message.toolCards ?? [])].sort((a, b) => a.seq - b.seq);
+    return sorted;
+  }, [message.toolCards]);
+
+  const anchorIdForCitation = useCallback((index: number) => {
+    return `tool-card-anchor-${message.id}-${index}`;
+  }, [message.id]);
+
+  const handleCitationClick = useCallback((citationIndex: number) => {
+    const anchorId = anchorIdForCitation(citationIndex);
+    const node = document.getElementById(anchorId);
+    if (node) {
+      node.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightedCitation(citationIndex);
+      window.setTimeout(() => setHighlightedCitation((cur) => (cur === citationIndex ? null : cur)), 1400);
+    }
+  }, [anchorIdForCitation]);
+
+  const toolCardIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    cardsByCitation.forEach((card, idx) => {
+      map.set(card.id, idx + 1);
+    });
+    return map;
+  }, [cardsByCitation]);
 
   let contentArea: React.ReactNode;
   if (message.timeline && message.timeline.length > 0) {
-    // Group contiguous sequences of 'text' together and contiguous 'step' together
-    const groupedItems: Array<{ type: "text", content: string, key: string } | { type: "step", steps: AgentStep[], key: string }> = [];
+    const groupedItems: Array<
+      { type: "text"; content: string; key: string }
+      | { type: "step"; steps: AgentStep[]; key: string }
+      | { type: "tool_card"; card: ToolCardMessage; key: string }
+    > = [];
 
     for (const item of message.timeline) {
-      if (groupedItems.length === 0) {
-        if (item.type === "text") {
+      const lastGroup = groupedItems[groupedItems.length - 1];
+      if (!lastGroup) {
+        if (item.type === "step") {
+          groupedItems.push({ type: "step", steps: [item.step], key: item.key });
+        } else if (item.type === "text") {
           groupedItems.push({ ...item });
         } else {
-          groupedItems.push({ type: "step", steps: [item.step], key: item.key });
+          groupedItems.push({ ...item });
         }
+        continue;
+      }
+
+      if (item.type === "text" && lastGroup.type === "text") {
+        lastGroup.content += item.content;
+      } else if (item.type === "step" && lastGroup.type === "step") {
+        lastGroup.steps.push(item.step);
+      } else if (item.type === "step") {
+        groupedItems.push({ type: "step", steps: [item.step], key: item.key });
       } else {
-        const lastGroup = groupedItems[groupedItems.length - 1];
-        if (item.type === "text") {
-          if (lastGroup.type === "text") {
-            lastGroup.content += item.content;
-          } else {
-            groupedItems.push({ ...item });
-          }
-        } else {
-          if (lastGroup.type === "step") {
-            lastGroup.steps.push(item.step);
-          } else {
-            groupedItems.push({ type: "step", steps: [item.step], key: item.key });
-          }
-        }
+        groupedItems.push({ ...item });
       }
     }
 
@@ -66,8 +99,20 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
                 ))}
               </div>
             );
+          } else if (group.type === "tool_card") {
+            const citationIndex = toolCardIndexById.get(group.card.id) ?? 0;
+            if (citationIndex <= 0) return null;
+            return (
+              <ToolCard
+                key={group.key}
+                card={group.card}
+                citationIndex={citationIndex}
+                anchorId={anchorIdForCitation(citationIndex)}
+                highlighted={highlightedCitation === citationIndex}
+              />
+            );
           } else {
-            const parts = renderContent(group.content, selectTicker, onReviewTrade);
+            const parts = renderContent(group.content, selectTicker, onReviewTrade, handleCitationClick);
             return <React.Fragment key={group.key}>{parts}</React.Fragment>;
           }
         })}
@@ -75,7 +120,7 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
     );
   } else {
     // Fallback for older messages
-    const parts = renderContent(message.content, selectTicker, onReviewTrade);
+    const parts = renderContent(message.content, selectTicker, onReviewTrade, handleCitationClick);
     contentArea = (
       <>
         {isAssistant && message.steps && message.steps.length > 0 && (
@@ -86,6 +131,19 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
           </div>
         )}
         {parts}
+        {cardsByCitation.length > 0 && (
+          <div className="tool-cards">
+            {cardsByCitation.map((card, idx) => (
+              <ToolCard
+                key={card.id}
+                card={card}
+                citationIndex={idx + 1}
+                anchorId={anchorIdForCitation(idx + 1)}
+                highlighted={highlightedCitation === idx + 1}
+              />
+            ))}
+          </div>
+        )}
       </>
     );
   }
@@ -107,6 +165,13 @@ export function ChatMessage({ message, isStreaming, onReviewTrade }: Props) {
         )}
         {isAssistant && message.sources && message.sources.length > 0 && (
           <CitationFooter sources={message.sources} />
+        )}
+        {isAssistant && message.runId && (
+          <div className="chat-run-link-row">
+            <button className="btn-ghost chat-run-link" onClick={() => onOpenRunExplorer?.(message.runId!)}>
+              Run Explorer
+            </button>
+          </div>
         )}
       </div>
       <div className="chat-meta">
@@ -188,8 +253,17 @@ function preprocessMentions(text: string): string {
   });
 }
 
+function preprocessCitations(text: string): string {
+  const withBracketMarkers = text.replace(/\[(\d+)\]/g, (_m, rawNum: string) => {
+    return `[${rawNum}](citation://${rawNum})`;
+  });
+  return withBracketMarkers.replace(/\^(\d+)\b/g, (_m, rawNum: string) => {
+    return `[^${rawNum}](citation://${rawNum})`;
+  });
+}
+
 /** Build the custom components map for ReactMarkdown */
-function makeComponents(selectTicker: (s: string) => void) {
+function makeComponents(selectTicker: (s: string) => void, onCitationClick: (citationIndex: number) => void) {
   return {
     // Intercept mention:// links to render as clickable mention tags
     a: ({ href, children, ...props }: ClassAttributes<HTMLAnchorElement> & AnchorHTMLAttributes<HTMLAnchorElement>) => {
@@ -203,6 +277,23 @@ function makeComponents(selectTicker: (s: string) => void) {
             className="mention-tag mention-tag--clickable"
             onClick={() => selectTicker(sym)}
             title={`View ${sym}`}
+          >
+            {children}
+          </button>
+        );
+      }
+      if (href?.startsWith("citation://")) {
+        const raw = href.slice("citation://".length);
+        const citationIndex = Number(raw);
+        return (
+          <button
+            className="citation-marker"
+            onClick={() => {
+              if (Number.isFinite(citationIndex) && citationIndex > 0) {
+                onCitationClick(citationIndex);
+              }
+            }}
+            title={`Open tool card [${raw}]`}
           >
             {children}
           </button>
@@ -228,13 +319,15 @@ function makeComponents(selectTicker: (s: string) => void) {
 function MarkdownSegment({
   text,
   selectTicker,
+  onCitationClick,
   segKey,
 }: {
   text: string;
   selectTicker: (s: string) => void;
+  onCitationClick: (citationIndex: number) => void;
   segKey: number;
 }) {
-  const components = makeComponents(selectTicker);
+  const components = makeComponents(selectTicker, onCitationClick);
   return (
     <ReactMarkdown
       key={segKey}
@@ -242,7 +335,7 @@ function MarkdownSegment({
       urlTransform={(url) => url}
       components={components}
     >
-      {preprocessMentions(text)}
+      {preprocessCitations(preprocessMentions(text))}
     </ReactMarkdown>
   );
 }
@@ -251,6 +344,7 @@ function renderContent(
   text: string,
   selectTicker: (s: string) => void,
   onReviewTrade: (trade: TradeOrder) => void,
+  onCitationClick: (citationIndex: number) => void,
 ): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
   let key = 0;
@@ -262,7 +356,15 @@ function renderContent(
   while ((match = TRADE_RE.exec(text)) !== null) {
     if (match.index > last) {
       const segment = text.slice(last, match.index);
-      parts.push(<MarkdownSegment key={key++} segKey={key} text={segment} selectTicker={selectTicker} />);
+      parts.push(
+        <MarkdownSegment
+          key={key++}
+          segKey={key}
+          text={segment}
+          selectTicker={selectTicker}
+          onCitationClick={onCitationClick}
+        />,
+      );
     }
 
     // Try to parse the trade JSON
@@ -306,14 +408,30 @@ function renderContent(
 
   if (last < text.length) {
     const segment = text.slice(last);
-    parts.push(<MarkdownSegment key={key++} segKey={key} text={segment} selectTicker={selectTicker} />);
+    parts.push(
+      <MarkdownSegment
+        key={key++}
+        segKey={key}
+        text={segment}
+        selectTicker={selectTicker}
+        onCitationClick={onCitationClick}
+      />,
+    );
   }
 
   // Only add the fallback segment when there is actual text to render.
   // An empty string produces a phantom <p> tag that pushes layout around
   // while steps are rendering before the first tokens arrive.
   if (parts.length === 0 && text.trim()) {
-    parts.push(<MarkdownSegment key={key++} segKey={key} text={text} selectTicker={selectTicker} />);
+    parts.push(
+      <MarkdownSegment
+        key={key++}
+        segKey={key}
+        text={text}
+        selectTicker={selectTicker}
+        onCitationClick={onCitationClick}
+      />,
+    );
   }
 
   return parts;

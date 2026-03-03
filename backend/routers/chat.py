@@ -367,9 +367,15 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                         "state": "running",
                         "message": f"Using {tool_human_label(name)}",
                     })
-                    yield emit({"type": "tool_start", "tool": name, "args": args_preview})
+                    yield emit({
+                        "type": "tool_start",
+                        "tool": name,
+                        "step_id": step_id,
+                        "args": args_preview,
+                    })
                     _fire_event(run_id, event_seq, "tool_start", {
                         "tool": name,
+                        "step_id": step_id,
                         "args_preview": {k: str(v)[:100] for k, v in list(raw_input.items())[:3]},
                     })
 
@@ -381,6 +387,8 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                     started = tool_start_times.pop(name, time.monotonic())
                     duration_ms = int((time.monotonic() - started) * 1000)
                     success = True
+                    parsed_result: dict[str, Any] | None = None
+                    tool_args = tool_args_cache.pop(name, None) or data.get("input") or {}
                     step_id = (
                         tool_step_ids[name].pop(0)
                         if tool_step_ids.get(name)
@@ -412,10 +420,9 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                             # Guard against non-dict parsed values (RC2 fix)
                             if isinstance(parsed, dict):
                                 success = bool(parsed.get("success", True))
+                                parsed_result = parsed
                             else:
                                 parsed = {"data": parsed, "success": True}
-                            # Use cached args from on_tool_start (RC3 fix)
-                            tool_args = tool_args_cache.pop(name, None) or data.get("input") or {}
                             # Collect for KG post-processing
                             accumulated_tool_results.append({
                                 "tool": name,
@@ -445,11 +452,21 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                             else f"Failed using {tool_human_label(name)}"
                         ),
                     })
-                    yield emit({"type": "tool_end", "tool": name, "duration_ms": duration_ms, "success": success})
-                    _fire_event(run_id, event_seq, "tool_end", {
+                    yield emit({
+                        "type": "tool_end",
                         "tool": name,
+                        "step_id": step_id,
                         "duration_ms": duration_ms,
                         "success": success,
+                        "result_envelope": parsed_result,
+                    })
+                    _fire_event(run_id, event_seq, "tool_end", {
+                        "tool": name,
+                        "step_id": step_id,
+                        "args_preview": {k: str(v)[:100] for k, v in list(tool_args.items())[:3]},
+                        "duration_ms": duration_ms,
+                        "success": success,
+                        "result_envelope": parsed_result,
                     })
 
                 elif evt == "on_chat_model_stream":

@@ -22,6 +22,8 @@ import type {
   SettingsValues,
   AnalysisSectionName,
   AgentMode,
+  AgentRunEventsResponse,
+  AgentRunSummary,
   DashboardMetrics,
   TickerEventsResponse,
   TickerNote,
@@ -358,6 +360,25 @@ export async function saveSettings(values: Record<string, string | null>): Promi
   }
 }
 
+// ── Agent runs ──────────────────────────────────────────────────────────────
+
+export async function fetchRun(runId: string): Promise<AgentRunSummary> {
+  const res = await fetch(`${API}/api/runs/${encodeURIComponent(runId)}`);
+  if (!res.ok) throw new Error(`Run fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchRunEvents(
+  runId: string,
+  offset = 0,
+  limit = 500,
+): Promise<AgentRunEventsResponse> {
+  const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  const res = await fetch(`${API}/api/runs/${encodeURIComponent(runId)}/events?${qs}`);
+  if (!res.ok) throw new Error(`Run events fetch failed: ${res.status}`);
+  return res.json();
+}
+
 export async function streamChat(
   message: string,
   sessionId: string,
@@ -469,18 +490,27 @@ export async function streamChat(
               : JSON.stringify(rawErr);
         onError(errContent, event.detail);
       } else if (event.type === "tool_start" && onToolEvent) {
-        onToolEvent({ tool: event.tool, status: "running", args: event.args });
+        onToolEvent({
+          seq: typeof event.seq === "number" ? event.seq : undefined,
+          tool: event.tool,
+          stepId: typeof event.step_id === "string" ? event.step_id : undefined,
+          status: "running",
+          args: event.args,
+        });
       } else if (event.type === "tool_end" && onToolEvent) {
         onToolEvent({
+          seq: typeof event.seq === "number" ? event.seq : undefined,
           tool: event.tool,
+          stepId: typeof event.step_id === "string" ? event.step_id : undefined,
           status: event.success === false ? "error" : "done",
           durationMs: event.duration_ms,
+          resultEnvelope: event.result_envelope,
         });
       } else if (event.type === "sources" && onSources) {
         onSources(event.sources ?? []);
       } else if (event.type === "kg_update" && onKgUpdate) {
         onKgUpdate(event.nodes_created ?? 0, event.edges_created ?? 0, event.error);
-      } else if (event.type === "step" && onProgressEvent) {
+      } else if ((event.type === "step" || event.type === "status") && onProgressEvent) {
         const rawState = event.state;
         const state =
           rawState === "done" || rawState === "error" || rawState === "running"
@@ -491,6 +521,7 @@ export async function streamChat(
           eventType: event.type,
           state,
           message: typeof event.message === "string" ? event.message : "Agent update",
+          runId: typeof event.run_id === "string" ? event.run_id : undefined,
           stepId: typeof event.step_id === "string" ? event.step_id : undefined,
           category: event.category === "tool" || event.category === "stage" ? event.category : undefined,
           tool: typeof event.tool === "string" ? event.tool : undefined,

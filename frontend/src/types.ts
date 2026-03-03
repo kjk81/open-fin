@@ -61,14 +61,17 @@ export type BackendStatus = "connecting" | "running" | "migration_error" | "erro
 
 export type TimelineItem =
   | { type: "text"; content: string; key: string }
-  | { type: "step"; step: AgentStep; key: string };
+  | { type: "step"; step: AgentStep; key: string }
+  | { type: "tool_card"; card: ToolCardMessage; key: string };
 
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: number;
+  runId?: string;
   toolEvents?: ToolEvent[];
+  toolCards?: ToolCardMessage[];
   steps?: AgentStep[];
   timeline?: TimelineItem[];
   completionStatus?: AssistantCompletionStatus;
@@ -94,6 +97,7 @@ export interface AgentProgressEvent {
   eventType: "step" | "status";
   state: AgentStepState;
   message: string;
+  runId?: string;
   stepId?: string;
   category?: "tool" | "stage";
   tool?: string;
@@ -102,11 +106,62 @@ export interface AgentProgressEvent {
   verbose?: boolean;
 }
 
-export interface ToolEvent {
+export interface ToolProvenance {
+  source?: string;
+  retrieved_at?: string;
+  as_of?: string;
+  identifier?: string;
+}
+
+export interface ToolQuality {
+  warnings?: string[];
+  completeness?: number;
+}
+
+export interface ToolEnvelopeSourceRef {
+  url?: string;
+  title?: string;
+  fetched_at?: string;
+}
+
+export interface ToolResultEnvelope {
+  data?: unknown;
+  provenance?: ToolProvenance;
+  quality?: ToolQuality;
+  timing?: {
+    tool_name?: string;
+    started_at?: string;
+    ended_at?: string;
+    duration_ms?: number;
+  };
+  sources?: ToolEnvelopeSourceRef[];
+  success?: boolean;
+  error?: string | null;
+  raw_ref?: {
+    storage_type?: string;
+    ref?: string;
+  } | null;
+}
+
+export interface ToolCardMessage {
+  id: string;
+  seq: number;
   tool: string;
+  stepId?: string;
+  status: "done" | "error";
+  durationMs?: number;
+  args?: Record<string, unknown>;
+  resultEnvelope?: ToolResultEnvelope;
+}
+
+export interface ToolEvent {
+  seq?: number;
+  tool: string;
+  stepId?: string;
   status: "running" | "done" | "error";
   args?: Record<string, unknown>;
   durationMs?: number;
+  resultEnvelope?: ToolResultEnvelope;
 }
 
 export interface SourceRef {
@@ -380,4 +435,29 @@ export interface TerminalLogEntry {
   level: TerminalLogLevel;
   message: string;
   detail?: string;
+}
+
+export interface AgentRunSummary {
+  id: string;
+  session_id: string;
+  mode: AgentMode;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface AgentRunEvent {
+  id: number;
+  run_id: string;
+  seq: number;
+  type: string;
+  payload_json: string;
+  payload?: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
+export interface AgentRunEventsResponse {
+  run_id: string;
+  total: number;
+  items: AgentRunEvent[];
 }

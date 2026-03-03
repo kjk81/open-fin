@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -34,12 +35,21 @@ def _serialize_run(run: AgentRun) -> dict:
 
 
 def _serialize_event(event: AgentRunEvent) -> dict:
+    payload: dict | None = None
+    try:
+        parsed = json.loads(event.payload_json or "{}")
+        if isinstance(parsed, dict):
+            payload = parsed
+    except Exception:
+        payload = None
+
     return {
         "id": event.id,
         "run_id": event.run_id,
         "seq": event.seq,
         "type": event.type,
         "payload_json": event.payload_json,
+        "payload": payload,
         "created_at": event.created_at.isoformat() if event.created_at else None,
     }
 

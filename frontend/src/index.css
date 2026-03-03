@@ -1312,6 +1312,123 @@ body {
   text-decoration: underline;
 }
 
+.citation-marker {
+  border: none;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.chat-run-link-row {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.chat-run-link {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.tool-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tool-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.tool-card--highlight {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.tool-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.tool-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: capitalize;
+}
+
+.tool-card-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.tool-card-status--done {
+  color: var(--green);
+}
+
+.tool-card-status--error {
+  color: var(--red);
+}
+
+.tool-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tool-card-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.tool-card-row strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tool-card-text {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text);
+  margin: 0;
+}
+
+.tool-card-json {
+  margin: 0;
+  font-size: 11px;
+  overflow-x: auto;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.tool-card-meta {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
 /* ── Mention popover ───────────────────────────────────────────────────────── */
 
 .mention-popover {
@@ -1413,6 +1530,66 @@ body {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 20px;
+}
+
+.run-explorer-modal {
+  width: min(860px, 90vw);
+  max-height: 82vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.run-explorer-meta {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.run-explorer-events {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  min-height: 180px;
+  max-height: 52vh;
+}
+
+.run-event-row {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0;
+}
+
+.run-event-row:last-child {
+  border-bottom: none;
+}
+
+.run-event-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.run-event-payload {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.run-explorer-loading,
+.run-explorer-error {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.run-explorer-error {
+  color: var(--red);
 }
 
 /* ── Trade detail rows ───────────────────────────────────────────────────── */

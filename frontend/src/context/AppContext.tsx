@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  AgentRunEvent,
   AgentMode,
   AgentStep,
   AnalysisSectionName,
@@ -20,12 +21,15 @@ import type {
   TerminalLogType,
   TickerAnalysis,
   TickerInfo,
+  ToolCardMessage,
+  ToolResultEnvelope,
   ToolEvent,
   WatchlistItem,
 } from "../types";
 import {
   fetchHealthDetailed,
   fetchPortfolio,
+  fetchRunEvents,
   fetchTicker,
   postSystemEvent,
   streamAnalysis,
@@ -106,7 +110,10 @@ type Action =
   | { type: "APPEND_TO_LAST_MESSAGE"; content: string }
   | { type: "SET_CHAT_STREAMING"; streaming: boolean }
   | { type: "UPDATE_TOOL_EVENT"; event: ToolEvent }
+  | { type: "UPSERT_TOOL_CARD"; card: ToolCardMessage }
+  | { type: "HYDRATE_TOOL_CARDS_FROM_RUN"; cards: ToolCardMessage[] }
   | { type: "UPDATE_AGENT_STEP"; step: AgentStep }
+  | { type: "SET_LAST_ASSISTANT_RUN_ID"; runId: string }
   | { type: "SET_LAST_ASSISTANT_STATUS"; status: "streaming" | "complete" | "incomplete" }
   | { type: "FINALIZE_RUNNING_STEPS" }
   | { type: "SET_LAST_MESSAGE_SOURCES"; sources: SourceRef[] }
@@ -121,6 +128,79 @@ type Action =
   | { type: "CLEAR_TERMINAL_LOGS" }
   | { type: "KG_UPDATED"; ticker?: string }
   | { type: "SET_DEBUG_MODE"; enabled: boolean };
+
+function toToolCardId(card: Pick<ToolCardMessage, "seq" | "tool" | "stepId">): string {
+  if (Number.isFinite(card.seq) && card.seq >= 0) {
+    return `tool-card-seq-${card.seq}`;
+  }
+  if (card.stepId) {
+    return `tool-card-${card.stepId}`;
+  }
+  return `tool-card-${card.tool}-${crypto.randomUUID()}`;
+}
+
+function upsertToolCardInMessage(message: ChatMessage, card: ToolCardMessage): ChatMessage {
+  if (message.role !== "assistant") return message;
+  const cards = [...(message.toolCards ?? [])];
+  const idx = cards.findIndex((existing) => existing.id === card.id || (existing.seq >= 0 && existing.seq === card.seq));
+  if (idx >= 0) {
+    cards[idx] = { ...cards[idx], ...card };
+    const timeline = (message.timeline ?? []).map((item) => {
+      if (item.type === "tool_card" && item.card.id === cards[idx].id) {
+        return { ...item, card: cards[idx] };
+      }
+      return item;
+    });
+    return { ...message, toolCards: cards, timeline };
+  }
+
+  const nextCards = [...cards, card].sort((a, b) => a.seq - b.seq);
+  const timeline = [...(message.timeline ?? []), { type: "tool_card" as const, card, key: crypto.randomUUID() }];
+  return { ...message, toolCards: nextCards, timeline };
+}
+
+function cardFromToolEvent(event: ToolEvent): ToolCardMessage | null {
+  if (event.status !== "done" && event.status !== "error") return null;
+  const seq = typeof event.seq === "number" ? event.seq : Number.MAX_SAFE_INTEGER;
+  const card: ToolCardMessage = {
+    id: toToolCardId({ seq, tool: event.tool, stepId: event.stepId }),
+    seq,
+    tool: event.tool,
+    stepId: event.stepId,
+    status: event.status,
+    durationMs: event.durationMs,
+    args: event.args,
+    resultEnvelope: event.resultEnvelope,
+  };
+  return card;
+}
+
+function cardFromRunEvent(event: AgentRunEvent): ToolCardMessage | null {
+  if (event.type !== "tool_end") return null;
+  const payload = event.payload ?? {};
+  const tool = typeof payload.tool === "string" ? payload.tool : "unknown_tool";
+  const seq = typeof event.seq === "number" ? event.seq : Number.MAX_SAFE_INTEGER;
+  const status = payload.success === false ? "error" : "done";
+  const stepId = typeof payload.step_id === "string" ? payload.step_id : undefined;
+  const durationMs = typeof payload.duration_ms === "number" ? payload.duration_ms : undefined;
+  const argsPreview = payload.args_preview;
+  const args = argsPreview && typeof argsPreview === "object" ? (argsPreview as Record<string, unknown>) : undefined;
+  const resultEnvelope = payload.result_envelope;
+  const envelope = resultEnvelope && typeof resultEnvelope === "object"
+    ? (resultEnvelope as ToolResultEnvelope)
+    : undefined;
+
+  return {
+    id: toToolCardId({ seq, tool, stepId }),
+    seq,
+    tool,
+    stepId,
+    status,
+    durationMs,
+    args,
+    resultEnvelope: envelope,
+  };
+}
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -178,6 +258,27 @@ function reducer(state: AppState, action: Action): AppState {
       msgs[msgs.length - 1] = { ...last, toolEvents: updated };
       return { ...state, chatMessages: msgs };
     }
+    case "UPSERT_TOOL_CARD": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      msgs[msgs.length - 1] = upsertToolCardInMessage(last, action.card);
+      return { ...state, chatMessages: msgs };
+    }
+    case "HYDRATE_TOOL_CARDS_FROM_RUN": {
+      if (action.cards.length === 0) return state;
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      let hydrated = last;
+      for (const card of action.cards) {
+        hydrated = upsertToolCardInMessage(hydrated, card);
+      }
+      msgs[msgs.length - 1] = hydrated;
+      return { ...state, chatMessages: msgs };
+    }
     case "UPDATE_AGENT_STEP": {
       const msgs = [...state.chatMessages];
       if (msgs.length === 0) return state;
@@ -208,6 +309,14 @@ function reducer(state: AppState, action: Action): AppState {
       const last = msgs[msgs.length - 1];
       if (last.role !== "assistant") return state;
       msgs[msgs.length - 1] = { ...last, completionStatus: action.status };
+      return { ...state, chatMessages: msgs };
+    }
+    case "SET_LAST_ASSISTANT_RUN_ID": {
+      const msgs = [...state.chatMessages];
+      if (msgs.length === 0) return state;
+      const last = msgs[msgs.length - 1];
+      if (last.role !== "assistant") return state;
+      msgs[msgs.length - 1] = { ...last, runId: action.runId };
       return { ...state, chatMessages: msgs };
     }
     case "FINALIZE_RUNNING_STEPS": {
@@ -552,6 +661,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       role: "assistant",
       content: "",
       timestamp: Date.now(),
+      toolCards: [],
       completionStatus: "streaming",
       // Immediately show a placeholder step so the bubble is never empty.
       // The reducer removes it once the first real backend step arrives.
@@ -583,6 +693,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     termLog("system", "info", `Pipeline initiated → "${preview}"`);
 
     let tokenLogged = false;
+    let runId: string | undefined;
     streamChat(
       text,
       sessionId.current,
@@ -595,6 +706,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       },
       () => {
+        if (runId) {
+          void fetchRunEvents(runId)
+            .then((runEventsResponse) => {
+              const cards = runEventsResponse.items
+                .map(cardFromRunEvent)
+                .filter((card): card is ToolCardMessage => card !== null);
+              if (cards.length > 0) {
+                dispatch({ type: "HYDRATE_TOOL_CARDS_FROM_RUN", cards });
+              }
+            })
+            .catch((err) => {
+              termLog("error", "warn", `Run hydration failed: ${String(err)}`);
+            });
+        }
         dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
         dispatch({ type: "SET_LAST_ASSISTANT_STATUS", status: "complete" });
         dispatch({ type: "FINALIZE_RUNNING_STEPS" });
@@ -609,6 +734,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       undefined, // signal
       (toolEvent) => {
         dispatch({ type: "UPDATE_TOOL_EVENT", event: toolEvent });
+        const toolCard = cardFromToolEvent(toolEvent);
+        if (toolCard) {
+          dispatch({ type: "UPSERT_TOOL_CARD", card: toolCard });
+        }
         if (toolEvent.status === "running") {
           const argEntries = toolEvent.args ? Object.entries(toolEvent.args) : [];
           const argsPreview = (state.debugMode ? argEntries : argEntries.slice(0, 2))
@@ -635,6 +764,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       },
       (progressEvent) => {
+        if (progressEvent.runId && progressEvent.runId !== runId) {
+          runId = progressEvent.runId;
+          dispatch({ type: "SET_LAST_ASSISTANT_RUN_ID", runId: progressEvent.runId });
+        }
         const msg = progressEvent.message;
         const level: TerminalLogLevel =
           progressEvent.state === "error"

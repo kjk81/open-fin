@@ -44,10 +44,12 @@ function user(content: string): ChatMessageType {
 }
 
 const noop = vi.fn();
+const onOpenRunExplorer = vi.fn();
 
 beforeEach(() => {
   mockSelectTicker.mockClear();
   noop.mockClear();
+  onOpenRunExplorer.mockClear();
 });
 
 // ---------------------------------------------------------------------------
@@ -279,6 +281,69 @@ describe("ChatMessage timeline behavior", () => {
     expect(fullText.indexOf("First text.")).toBeLessThan(fullText.indexOf("Step one running"));
     expect(fullText.indexOf("Step one running")).toBeLessThan(fullText.indexOf("Second text."));
     expect(fullText.indexOf("Second text.")).toBeLessThan(fullText.indexOf("Step two done"));
+  });
+
+  it("renders tool cards in timeline and supports citation marker buttons", () => {
+    render(
+      <ChatMessage
+        message={{
+          ...assistant("Use the quote [1] for context."),
+          timeline: [
+            { type: "text", key: "text-1", content: "Use the quote [1] for context." },
+            {
+              type: "tool_card",
+              key: "tool-card-1",
+              card: {
+                id: "tool-card-seq-11",
+                seq: 11,
+                tool: "price_quote",
+                status: "done",
+                resultEnvelope: {
+                  data: { symbol: "AAPL", price: 190.22 },
+                  provenance: { source: "fmp", retrieved_at: "2026-03-03T00:00:00Z" },
+                  sources: [{ title: "FMP", url: "https://example.com", fetched_at: "2026-03-03T00:00:00Z" }],
+                },
+              },
+            },
+          ],
+          toolCards: [
+            {
+              id: "tool-card-seq-11",
+              seq: 11,
+              tool: "price_quote",
+              status: "done",
+              resultEnvelope: {
+                data: { symbol: "AAPL", price: 190.22 },
+                provenance: { source: "fmp", retrieved_at: "2026-03-03T00:00:00Z" },
+                sources: [{ title: "FMP", url: "https://example.com", fetched_at: "2026-03-03T00:00:00Z" }],
+              },
+            },
+          ],
+        }}
+        isStreaming={false}
+        onReviewTrade={noop}
+      />,
+    );
+
+    expect(screen.getByText(/price quote/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "1" })).toBeTruthy();
+  });
+});
+
+describe("ChatMessage run explorer", () => {
+  it("renders a Run Explorer button and calls callback", () => {
+    render(
+      <ChatMessage
+        message={{ ...assistant("Done."), runId: "run-123" }}
+        isStreaming={false}
+        onReviewTrade={noop}
+        onOpenRunExplorer={onOpenRunExplorer}
+      />,
+    );
+
+    const btn = screen.getByRole("button", { name: /Run Explorer/i });
+    fireEvent.click(btn);
+    expect(onOpenRunExplorer).toHaveBeenCalledWith("run-123");
   });
 });
 
