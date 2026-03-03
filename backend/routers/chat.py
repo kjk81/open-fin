@@ -102,8 +102,25 @@ def _complete_run(run_id: str, status: str) -> None:
 
 
 def _fire_event(run_id: str, seq: int, event_type: str, payload: dict) -> None:
-    """Non-blocking: submit a persist-event task to the background pool."""
-    _persist_pool.submit(_persist_event, run_id, seq, event_type, payload)
+    """Non-blocking: submit a persist-event task to the background pool.
+
+    Any exception raised by the underlying _persist_event call must not
+    break the streaming pipeline. Instead, log a warning so that loss of
+    observability is visible in logs and tests.
+    """
+
+    def _task() -> None:
+        try:
+            _persist_event(run_id, seq, event_type, payload)
+        except Exception as exc:  # pragma: no cover - exercised via eval harness tests
+            logger.warning(
+                "Failed to persist run event seq=%d for run %s: %s",
+                seq,
+                run_id,
+                exc,
+            )
+
+    _persist_pool.submit(_task)
 
 
 def _fire_complete(run_id: str, status: str) -> None:

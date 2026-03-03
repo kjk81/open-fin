@@ -15,6 +15,7 @@ from datetime import datetime, date
 from typing import Any, AsyncGenerator, Generator
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -82,7 +83,7 @@ def db_session() -> Generator[Session, None, None]:
     connection.close()
 
 
-@pytest.fixture()
+@pytest_asyncio.fixture()
 async def async_db_session() -> AsyncGenerator[AsyncSession, None]:
     """Provide a clean async SQLAlchemy session for a single test."""
     async with test_async_engine.begin() as conn:

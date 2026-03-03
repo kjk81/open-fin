@@ -97,10 +97,11 @@ _lgm.add_messages = lambda x, y: x + y
 # ---------------------------------------------------------------------------
 
 import pytest
+import pytest_asyncio
 from unittest.mock import AsyncMock, patch
 
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def _ensure_async_tables():
     """Create KG tables on the async test engine and clean between tests.
 

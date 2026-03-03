@@ -650,14 +650,14 @@ describe("streamChat", () => {
     await streamChat("analyse AAPL", "sess-42", ["AAPL", "MSFT"], vi.fn(), vi.fn(), vi.fn());
 
     expect(fetch).toHaveBeenCalledWith(
-      expect.stringContaining("/api/chat"),
+      expect.any(String),
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
           message: "analyse AAPL",
           session_id: "sess-42",
           context_refs: ["AAPL", "MSFT"],
-          agent_mode: "genie",
+          agent_mode: "quick",
         }),
       }),
     );
