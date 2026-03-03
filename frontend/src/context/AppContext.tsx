@@ -16,6 +16,7 @@ import type {
   BackendStatus,
   ChatMessage,
   ConsentProposal,
+  ActionPreviewEvent,
   PortfolioPosition,
   SourceRef,
   TerminalLogEntry,
@@ -38,6 +39,7 @@ import {
   postSystemEvent,
   streamAnalysis,
   streamChat,
+  streamConfirmActions,
   fetchWatchlist,
   addToWatchlist,
   removeFromWatchlist,
@@ -70,6 +72,7 @@ interface AppState {
   activeRunToolCalls: number;
   activeRunElapsedSeconds: number;
   activeRunStartedAt: number | null;
+  pendingActionPreview: ActionPreviewEvent | null;
 }
 
 const _EMPTY_ANALYSIS: TickerAnalysis = {
@@ -109,6 +112,7 @@ const initialState: AppState = {
   activeRunToolCalls: 0,
   activeRunElapsedSeconds: 0,
   activeRunStartedAt: null,
+  pendingActionPreview: null,
 };
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -154,7 +158,9 @@ type Action =
   | { type: "SET_DEBUG_MODE"; enabled: boolean }
   | { type: "SET_LAST_VERIFICATION_REPORT"; report: VerificationReport }
   | { type: "SET_LAST_CONSENT_PROPOSAL"; proposal: ConsentProposal }
-  | { type: "CLEAR_LAST_CONSENT_PROPOSAL" };
+  | { type: "CLEAR_LAST_CONSENT_PROPOSAL" }
+  | { type: "SET_PENDING_ACTION_PREVIEW"; preview: ActionPreviewEvent }
+  | { type: "CLEAR_PENDING_ACTION_PREVIEW" };
 
 function toToolCardId(card: Pick<ToolCardMessage, "seq" | "tool" | "stepId">): string {
   if (Number.isFinite(card.seq) && card.seq >= 0) {
@@ -535,6 +541,10 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, kgLastUpdated: Date.now(), kgLastTicker: action.ticker ?? null };
     case "SET_DEBUG_MODE":
       return { ...state, debugMode: action.enabled };
+    case "SET_PENDING_ACTION_PREVIEW":
+      return { ...state, pendingActionPreview: action.preview };
+    case "CLEAR_PENDING_ACTION_PREVIEW":
+      return { ...state, pendingActionPreview: null };
     default:
       return state;
   }
@@ -556,6 +566,8 @@ interface AppContextValue {
   setDebugMode: (enabled: boolean) => void;
   setAgentMode: (mode: AgentMode) => void;
   clearConsentProposal: () => void;
+  confirmActions: (confirmedActionIds: string[]) => void;
+  dismissActionPreview: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -816,6 +828,62 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "CLEAR_LAST_CONSENT_PROPOSAL" });
   }, []);
 
+  const dismissActionPreview = useCallback(() => {
+    dispatch({ type: "CLEAR_PENDING_ACTION_PREVIEW" });
+  }, []);
+
+  const confirmActions = useCallback((confirmedActionIds: string[]) => {
+    const preview = state.pendingActionPreview;
+    if (!preview) return;
+
+    dispatch({ type: "CLEAR_PENDING_ACTION_PREVIEW" });
+    dispatch({ type: "SET_CHAT_STREAMING", streaming: true });
+    dispatch({ type: "START_CHAT_RUN", startedAt: Date.now() });
+
+    termLog("system", "info", `Confirming ${confirmedActionIds.length} action(s)…`);
+
+    streamConfirmActions(
+      sessionId.current,
+      preview.run_id,
+      confirmedActionIds,
+      (token) => {
+        dispatch({ type: "APPEND_TO_LAST_MESSAGE", content: token });
+      },
+      () => {
+        dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
+        dispatch({ type: "STOP_CHAT_RUN" });
+        dispatch({ type: "SET_LAST_ASSISTANT_STATUS", status: "complete" });
+        dispatch({ type: "FINALIZE_RUNNING_STEPS" });
+        termLog("done", "success", "Confirmed actions complete.");
+      },
+      (err, detail) => {
+        const displayMsg = state.debugMode && detail ? detail : err;
+        dispatch({ type: "SET_CHAT_STREAMING", streaming: false });
+        dispatch({ type: "STOP_CHAT_RUN" });
+        dispatch({ type: "SET_LAST_ASSISTANT_STATUS", status: "incomplete" });
+        termLog("error", "error", displayMsg, detail);
+      },
+      (nestedPreview) => {
+        dispatch({ type: "SET_PENDING_ACTION_PREVIEW", preview: nestedPreview });
+        termLog("status", "warn", `Additional confirmation required for ${nestedPreview.unconfirmed_actions.length} action(s)`);
+      },
+      (progressEvent) => {
+        dispatch({
+          type: "UPDATE_AGENT_STEP",
+          step: {
+            seq: progressEvent.seq,
+            stepId: progressEvent.stepId ?? `seq-${progressEvent.seq}`,
+            message: progressEvent.message,
+            state: progressEvent.state,
+            category: progressEvent.category ?? (progressEvent.eventType === "status" ? "stage" : "tool"),
+            tool: progressEvent.tool,
+            durationMs: progressEvent.durationMs,
+          },
+        });
+      },
+    );
+  }, [state.pendingActionPreview, state.debugMode, termLog]);
+
   const sendMessage = useCallback((text: string, contextRefs: string[], agentMode?: AgentMode) => {
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -1020,11 +1088,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "SET_LAST_CONSENT_PROPOSAL", proposal });
         termLog("status", "warn", `Memory consent required: ${proposal.tool_result_count} result(s), ${proposal.source_count} source(s)`);
       },
+      (preview) => {
+        dispatch({ type: "SET_PENDING_ACTION_PREVIEW", preview });
+        termLog("status", "warn", `Confirmation required for ${preview.unconfirmed_actions.length} action(s)`);
+      },
     );
   }, [termLog, state.debugMode, state.agentMode]);
 
   return (
-    <AppContext.Provider value={{ state, selectTicker, navigateToDashboard, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage, toggleTerminal, clearTerminalLogs, setDebugMode, setAgentMode, clearConsentProposal }}>
+    <AppContext.Provider value={{ state, selectTicker, navigateToDashboard, sendMessage, reloadPortfolio, reloadWatchlist, toggleWatchlist, addSystemMessage, toggleTerminal, clearTerminalLogs, setDebugMode, setAgentMode, clearConsentProposal, confirmActions, dismissActionPreview }}>
       {children}
     </AppContext.Provider>
   );

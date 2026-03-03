@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext";
 import type { AgentMode, MentionOption, TradeOrder } from "../types";
+import { ActionConfirmationDialog } from "./ActionConfirmationDialog";
 import { ChatMessage } from "./ChatMessage";
 import { ConsentDialog } from "./ConsentDialog";
 import { MentionPopover } from "./MentionPopover";
@@ -49,7 +50,7 @@ function getMentionQuery(value: string, cursorPos: number): string | null {
 }
 
 export function ChatBox() {
-  const { state, sendMessage, selectTicker, reloadPortfolio, addSystemMessage, setAgentMode } = useAppContext();
+  const { state, sendMessage, selectTicker, reloadPortfolio, addSystemMessage, setAgentMode, confirmActions, dismissActionPreview } = useAppContext();
   const {
     chatMessages,
     chatStreaming,
@@ -291,6 +292,13 @@ export function ChatBox() {
         <RunExplorerModal runId={exploringRunId} onClose={() => setExploringRunId(null)} />
       )}
       {pendingConsent && <ConsentDialog proposal={pendingConsent} />}
+      {state.pendingActionPreview && (
+        <ActionConfirmationDialog
+          preview={state.pendingActionPreview}
+          onConfirm={confirmActions}
+          onDismiss={dismissActionPreview}
+        />
+      )}
     </main>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchRun, fetchRunEvents } from "../api";
-import type { AgentRunEvent, AgentRunSummary } from "../types";
+import type { AgentRunEvent, AgentRunSummary, StateWritePayload } from "../types";
 
 interface Props {
   runId: string;
@@ -12,6 +12,57 @@ function eventPayload(event: AgentRunEvent): string {
     return JSON.stringify(event.payload, null, 2);
   }
   return event.payload_json || "{}";
+}
+
+function parseStateWritePayload(event: AgentRunEvent): StateWritePayload | null {
+  if (event.type !== "state_write") return null;
+  try {
+    const payload = event.payload ?? JSON.parse(event.payload_json || "{}");
+    if (payload && typeof payload.tool === "string" && typeof payload.rollback_hint === "string") {
+      return payload as StateWritePayload;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function StateWriteEventRow({ event, payload }: { event: AgentRunEvent; payload: StateWritePayload }) {
+  const [showRollback, setShowRollback] = useState(false);
+
+  return (
+    <div className="run-event-row state-write-row">
+      <div className="run-event-header">
+        <span>#{event.seq}</span>
+        <span className="state-write-badge">STATE WRITE</span>
+      </div>
+      <div className="state-write-detail">
+        <div className="state-write-tool">{payload.tool}</div>
+        {payload.delta && <div className="state-write-delta">{payload.delta}</div>}
+        {payload.result_summary && (
+          <div className="state-write-result">{payload.result_summary}</div>
+        )}
+        {payload.args && Object.keys(payload.args).length > 0 && (
+          <div className="state-write-args">
+            {Object.entries(payload.args).map(([k, v]) => (
+              <span key={k} className="action-arg-chip">
+                {k}: {JSON.stringify(v)}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="state-write-rollback-row">
+        <button
+          className="btn-ghost state-write-rollback-btn"
+          onClick={() => setShowRollback((s) => !s)}
+        >
+          {showRollback ? "Hide Undo Info" : "How to Undo"}
+        </button>
+        {showRollback && (
+          <pre className="state-write-rollback-hint">{payload.rollback_hint}</pre>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function RunExplorerModal({ runId, onClose }: Props) {
@@ -60,15 +111,21 @@ export function RunExplorerModal({ runId, onClose }: Props) {
 
         {!loading && !error && (
           <div className="run-explorer-events" role="log" aria-label="Run events">
-            {events.map((event) => (
-              <div key={event.id} className="run-event-row">
-                <div className="run-event-header">
-                  <span>#{event.seq}</span>
-                  <span>{event.type}</span>
+            {events.map((event) => {
+              const stateWrite = parseStateWritePayload(event);
+              if (stateWrite) {
+                return <StateWriteEventRow key={event.id} event={event} payload={stateWrite} />;
+              }
+              return (
+                <div key={event.id} className="run-event-row">
+                  <div className="run-event-header">
+                    <span>#{event.seq}</span>
+                    <span>{event.type}</span>
+                  </div>
+                  <pre className="run-event-payload">{eventPayload(event)}</pre>
                 </div>
-                <pre className="run-event-payload">{eventPayload(event)}</pre>
-              </div>
-            ))}
+              );
+            })}
             {events.length === 0 && <div className="run-explorer-loading">No events found.</div>}
           </div>
         )}

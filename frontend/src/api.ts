@@ -32,6 +32,7 @@ import type {
   CapabilitiesSnapshotEvent,
   VerificationReport,
   ConsentProposal,
+  ActionPreviewEvent,
 } from "./types";
 
 // Mutable base URL — updated by initApiBase() before the React tree renders.
@@ -435,6 +436,7 @@ export async function streamChat(
   onCapabilities?: (event: CapabilitiesSnapshotEvent) => void,
   onVerificationReport?: (report: VerificationReport) => void,
   onConsentRequired?: (proposal: ConsentProposal) => void,
+  onActionPreview?: (preview: ActionPreviewEvent) => void,
 ): Promise<void> {
   let res: Response;
   try {
@@ -567,6 +569,14 @@ export async function streamChat(
         onVerificationReport(event.report as VerificationReport);
       } else if (event.type === "consent_required" && onConsentRequired) {
         onConsentRequired(event.proposal as ConsentProposal);
+      } else if (event.type === "action_preview" && onActionPreview) {
+        onActionPreview({
+          run_id: typeof event.run_id === "string" ? event.run_id : "",
+          session_id: typeof event.session_id === "string" ? event.session_id : "",
+          message: typeof event.message === "string" ? event.message : "",
+          unconfirmed_actions: Array.isArray(event.unconfirmed_actions) ? event.unconfirmed_actions : [],
+          confirm_url: typeof event.confirm_url === "string" ? event.confirm_url : "/api/chat/confirm",
+        });
       } else if ((event.type === "step" || event.type === "status") && onProgressEvent) {
         const rawState = event.state;
         const state =
@@ -621,6 +631,132 @@ export async function streamChat(
     reader.releaseLock();
     // Safety net: if the stream ended without emitting done or error
     // (e.g. network drop, server crash), resolve the loading state.
+    if (!settled) onDone();
+  }
+}
+
+// ── Confirm Actions SSE ──────────────────────────────────────────────────────
+
+export async function streamConfirmActions(
+  sessionId: string,
+  runId: string,
+  confirmedActionIds: string[],
+  onToken: (token: string) => void,
+  onDone: () => void,
+  onError: (err: string, detail?: string) => void,
+  onActionPreview?: (preview: ActionPreviewEvent) => void,
+  onProgressEvent?: (event: import("./types").AgentProgressEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(`${API}/api/chat/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionId,
+        run_id: runId,
+        confirmed_action_ids: confirmedActionIds,
+      }),
+      signal,
+    });
+    if (!res.ok) {
+      let errDetail = `HTTP ${res.status}`;
+      try {
+        const text = await res.text();
+        if (text) {
+          try {
+            const body = JSON.parse(text);
+            if (typeof body.detail === "string") errDetail = body.detail;
+            else errDetail = text;
+          } catch {
+            errDetail = text;
+          }
+        }
+      } catch { /* ignore */ }
+      onError(errDetail);
+      return;
+    }
+  } catch (e) {
+    if ((e as Error).name === "AbortError") return;
+    onError(String(e));
+    return;
+  }
+
+  if (!res.body) {
+    onError("No response body");
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let settled = false;
+
+  const dispatch = (part: string) => {
+    const match = part.match(/^data:\s*(.+)$/m);
+    if (!match) return;
+    try {
+      const event = JSON.parse(match[1]);
+      if (event.type === "token") {
+        const raw = event.content;
+        const content = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+        if (content) onToken(content);
+      } else if (event.type === "done") {
+        settled = true;
+        onDone();
+      } else if (event.type === "error") {
+        settled = true;
+        onError(typeof event.content === "string" ? event.content : "Unknown error", event.detail);
+      } else if (event.type === "action_preview" && onActionPreview) {
+        onActionPreview({
+          run_id: typeof event.run_id === "string" ? event.run_id : "",
+          session_id: typeof event.session_id === "string" ? event.session_id : "",
+          message: typeof event.message === "string" ? event.message : "",
+          unconfirmed_actions: Array.isArray(event.unconfirmed_actions) ? event.unconfirmed_actions : [],
+          confirm_url: typeof event.confirm_url === "string" ? event.confirm_url : "/api/chat/confirm",
+        });
+      } else if ((event.type === "step" || event.type === "status") && onProgressEvent) {
+        const rawState = event.state;
+        const state =
+          rawState === "done" || rawState === "error" || rawState === "running" || rawState === "warning"
+            ? rawState
+            : "running";
+        onProgressEvent({
+          seq: typeof event.seq === "number" ? event.seq : -1,
+          eventType: event.type,
+          state,
+          message: typeof event.message === "string" ? event.message : "Agent update",
+          runId: typeof event.run_id === "string" ? event.run_id : undefined,
+          stepId: typeof event.step_id === "string" ? event.step_id : undefined,
+          category: event.category === "tool" || event.category === "stage" ? event.category : undefined,
+          tool: typeof event.tool === "string" ? event.tool : undefined,
+          durationMs: typeof event.duration_ms === "number" ? event.duration_ms : undefined,
+          phase: typeof event.phase === "string" ? event.phase : undefined,
+          verbose: Boolean(event.verbose),
+          details: event.details && typeof event.details === "object" ? event.details : undefined,
+        });
+      }
+    } catch { /* ignore malformed JSON */ }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) dispatch(part);
+    }
+    if (buffer.trim()) dispatch(buffer);
+  } catch (e) {
+    if ((e as Error).name !== "AbortError") {
+      settled = true;
+      onError(String(e));
+    }
+  } finally {
+    reader.releaseLock();
     if (!settled) onDone();
   }
 }

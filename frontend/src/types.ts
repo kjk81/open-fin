@@ -507,3 +507,40 @@ export interface AgentRunEventsResponse {
   total: number;
   items: AgentRunEvent[];
 }
+
+// ── Action Confirmation ──────────────────────────────────────────────────────
+
+export type ActionCategory =
+  | "READ_ONLY"
+  | "WRITES_KG"
+  | "WRITES_PORTFOLIO"
+  | "STRATEGY_TRIGGER"
+  | "ADMIN";
+
+export interface UnconfirmedAction {
+  action_id: string;
+  tool: string;
+  category: ActionCategory;
+  args: Record<string, unknown>;
+  delta_preview: string;
+  justification_citations: string[];
+  created_at: string;
+}
+
+export interface ActionPreviewEvent {
+  run_id: string;
+  session_id: string;
+  message: string;
+  unconfirmed_actions: UnconfirmedAction[];
+  confirm_url: string;
+}
+
+/** Parsed state_write payload from AgentRunEvent.payload_json. */
+export interface StateWritePayload {
+  tool: string;
+  args: Record<string, unknown>;
+  result_summary: string;
+  delta: string;
+  confirmation_token: string;
+  rollback_hint: string;
+}
