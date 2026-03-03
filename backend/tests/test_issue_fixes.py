@@ -277,6 +277,52 @@ class TestToolExecutionBudgets:
         assert result["tool_loop_terminated_reason"] == "budget_exceeded"
 
 
+class TestVerificationTiebreaker:
+    async def test_tiebreaker_runs_single_targeted_tool_call(self):
+        from agent.graph import tiebreaker_tool_execution
+
+        fake_tool = MagicMock()
+        fake_tool.ainvoke = AsyncMock(return_value=json.dumps({
+            "success": True,
+            "data": {"market_cap": 3000000000000, "currency": "USD"},
+            "provenance": {"source": "fmp", "as_of": "2026-03-01"},
+            "quality": {"completeness": 0.99},
+        }))
+
+        state = {
+            "verification_report": {
+                "status": "critical",
+                "critical": [{"type": "core_fundamental_variance", "claim_key": "revenue"}],
+                "warnings": [],
+            },
+            "tickers_mentioned": ["AAPL"],
+            "tool_call_count": 0,
+            "tiebreaker_attempt_count": 0,
+            "start_time_utc": datetime.now(timezone.utc).isoformat(),
+            "agent_mode": "research",
+        }
+
+        with patch.dict("agent.graph._TOOL_MAP", {"get_financial_statements": fake_tool}, clear=False):
+            result = await tiebreaker_tool_execution(state)
+
+        assert result["tiebreaker_attempt_count"] == 1
+        assert result["tool_call_count"] == 1
+        assert result["tool_results"][0]["tool"] == "get_financial_statements"
+
+    async def test_tiebreaker_skips_when_already_attempted(self):
+        from agent.graph import tiebreaker_tool_execution
+
+        state = {
+            "verification_report": {"status": "critical", "critical": [{"type": "core_fundamental_variance"}]},
+            "tool_call_count": 0,
+            "tiebreaker_attempt_count": 1,
+            "start_time_utc": datetime.now(timezone.utc).isoformat(),
+            "agent_mode": "research",
+        }
+        result = await tiebreaker_tool_execution(state)
+        assert result["verification_failure_reason"] == "tiebreaker_already_attempted"
+
+
 class TestCapabilityDegradation:
     async def test_route_finance_query_records_mode_capability_limitation(self):
         from agent.graph import route_finance_query
@@ -453,6 +499,36 @@ class TestSSEDetailField:
         assert len(error_events) == 1
         assert "timed out" in error_events[0]["content"].lower()
         assert "TimeoutError" in error_events[0]["detail"]
+
+    async def test_sse_emits_verification_report_metadata(self):
+        """on_chain_end output with verification_report must be emitted to SSE."""
+
+        async def _events(*_args, **_kwargs):
+            yield {
+                "event": "on_chain_end",
+                "name": "verification_gate",
+                "data": {
+                    "output": {
+                        "verification_report": {
+                            "status": "warning",
+                            "warnings": [{"type": "missing_as_of", "claim_key": "market_cap"}],
+                            "critical": [],
+                        }
+                    }
+                },
+            }
+
+        self.graph_mock.astream_events = _events
+        app = self._app()
+
+        _, body = await self._post_chat(app, {
+            "message": "AAPL market cap",
+            "session_id": _valid_session_id(),
+        })
+        events = _parse_sse(body)
+        report_events = [e for e in events if e.get("type") == "verification_report"]
+        assert len(report_events) == 1
+        assert report_events[0]["report"]["status"] == "warning"
 
 
 # ── force_tool_retry — bypass prevention ─────────────────────────────────────

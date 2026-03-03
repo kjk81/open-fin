@@ -222,6 +222,11 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "degradation_events": [],
         "tool_loop_terminated_reason": "",
         "run_id": run_id,
+        "verification_report": {},
+        "verification_status": "pass",
+        "verification_failure_reason": "",
+        "tiebreaker_attempt_count": 0,
+        "verification_disclaimer_used": False,
     }
 
     # Accumulators filled during streaming
@@ -234,6 +239,7 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
     stage_step_ids: dict[str, str] = {}
     in_think_block = False
     think_buffer = ""
+    last_verification_report_hash = ""
 
     def emit(data: dict[str, Any]) -> str:
         nonlocal event_seq
@@ -380,6 +386,33 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                                         "suggestions": event.get("suggestions", []),
                                         "quick_mode_blocked_search": quick_mode_blocked,
                                     },
+                                })
+
+                        verification_report = chain_output.get("verification_report")
+                        if isinstance(verification_report, dict) and verification_report:
+                            fingerprint = json.dumps(verification_report, sort_keys=True, default=str)
+                            if fingerprint != last_verification_report_hash:
+                                last_verification_report_hash = fingerprint
+                                status = str(verification_report.get("status") or "pass").lower()
+                                if status in {"warning", "critical"}:
+                                    yield emit({
+                                        "type": "status",
+                                        "state": "warning" if status == "warning" else "error",
+                                        "phase": name,
+                                        "message": "Verification gate flagged issues in collected evidence",
+                                        "verbose": True,
+                                        "run_id": run_id,
+                                        "details": {
+                                            "status": status,
+                                            "warnings": verification_report.get("warnings", []),
+                                            "critical": verification_report.get("critical", []),
+                                        },
+                                    })
+                                yield emit({
+                                    "type": "verification_report",
+                                    "phase": name,
+                                    "run_id": run_id,
+                                    "report": verification_report,
                                 })
 
                     stage_message = describe_graph_stage(name, "end")

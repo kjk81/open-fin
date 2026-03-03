@@ -181,6 +181,85 @@ class TestFinalizeVerifyGateHelpers:
         assert len(artifacts) == 1
         assert artifacts[0]["ref_id"] == "REF-1"
 
+    def test_verification_report_reconciles_market_cap_with_warning_range(self) -> None:
+        from agent.graph import _build_verification_report
+
+        state = {
+            "tool_results": [
+                {
+                    "tool": "get_company_profile",
+                    "result": '{"data": {"market_cap": 3000000000000, "currency": "USD"}, '
+                              '"provenance": {"source": "fmp", "as_of": "2026-03-01"}, '
+                              '"quality": {"completeness": 0.98}, "success": true}',
+                },
+                {
+                    "tool": "search_web",
+                    "result": '{"data": [{"snippet": "AAPL market cap is about $2.9T"}], '
+                              '"provenance": {"source": "web", "as_of": "2026-03-01"}, '
+                              '"quality": {"completeness": 0.50}, "success": true}',
+                },
+            ]
+        }
+
+        report = _build_verification_report(state)
+        assert report["status"] == "warning"
+        mcap = next((c for c in report["reconciled_claims"] if c["claim_key"] == "market_cap"), None)
+        assert mcap is not None
+        assert "disagreement_range" in mcap
+
+    def test_verification_report_marks_core_fundamental_variance_critical(self) -> None:
+        from agent.graph import _build_verification_report
+
+        state = {
+            "tool_results": [
+                {
+                    "tool": "get_financial_statements",
+                    "result": '{"data": {"revenue": 1000, "currency": "USD"}, '
+                              '"provenance": {"source": "fmp", "as_of": "2026-03-01"}, '
+                              '"quality": {"completeness": 0.95}, "success": true}',
+                },
+                {
+                    "tool": "search_web",
+                    "result": '{"data": {"revenue": 1200, "currency": "USD"}, '
+                              '"provenance": {"source": "web", "as_of": "2026-03-01"}, '
+                              '"quality": {"completeness": 0.40}, "success": true}',
+                },
+            ]
+        }
+
+        report = _build_verification_report(state)
+        assert report["status"] == "critical"
+        assert any(item.get("type") == "core_fundamental_variance" for item in report["critical"])
+
+
+class TestVerificationRoute:
+    def test_routes_to_tiebreaker_on_first_critical(self) -> None:
+        from agent.graph import _route_after_verification
+
+        state = {
+            "verification_status": "critical",
+            "tiebreaker_attempt_count": 0,
+        }
+        assert _route_after_verification(state) == "tiebreaker_tool_execution"
+
+    def test_routes_to_disclaimer_after_tiebreaker_used(self) -> None:
+        from agent.graph import _route_after_verification
+
+        state = {
+            "verification_status": "critical",
+            "tiebreaker_attempt_count": 1,
+        }
+        assert _route_after_verification(state) == "verification_disclaimer_response"
+
+    def test_routes_to_finalize_on_warning(self) -> None:
+        from agent.graph import _route_after_verification
+
+        state = {
+            "verification_status": "warning",
+            "tiebreaker_attempt_count": 0,
+        }
+        assert _route_after_verification(state) == "finalize_response"
+
 
 # ---------------------------------------------------------------------------
 # IntentRouter with @ and $ prefixes

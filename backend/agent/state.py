@@ -106,3 +106,18 @@ class AgentState(TypedDict):
     # UUID of the persisted AgentRun record for this invocation.
     # Written once at stream start — no reducer needed.
     run_id: str
+
+    # Structured reconciliation/verification artifact emitted by verification_gate.
+    verification_report: dict[str, Any]
+
+    # verification_gate terminal status: "pass" | "warning" | "critical".
+    verification_status: str
+
+    # Human-readable reason when verification reports a critical failure.
+    verification_failure_reason: str
+
+    # One-shot tiebreaker loop counter (add reducer prevents infinite retries).
+    tiebreaker_attempt_count: Annotated[int, operator.add]
+
+    # True when graph falls back to a disclaimed response after failed tiebreak.
+    verification_disclaimer_used: bool

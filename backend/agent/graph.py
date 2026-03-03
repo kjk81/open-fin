@@ -15,8 +15,11 @@ Topology
       → context_injector
       → (route_after_context)
            ├─ finance intent ─→ route_finance_query ─→ (should_continue)
-           │                       ↑         ├─ execute ─→ execute_tool_calls ─┘
-           │                       │         └─ finalize ─→ finalize_response → END
+                     │                       ↑         ├─ execute ─→ execute_tool_calls ─┘
+                     │                       │         └─ finalize ─→ verification_gate
+                     │                       │                               ├─ pass/warn ─→ finalize_response → END
+                     │                       │                               └─ critical ─→ tiebreaker → verification_gate
+                     │                       │                                                   └─ unresolved → disclaimer → END
            └─ general_chat   ─→ generation_node → END
 """
 
@@ -67,6 +70,13 @@ MAX_TOOL_ROUNDS = 5
 _MAX_ARTIFACT_CHARS = 4_500
 _NUMERIC_RE = re.compile(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?%?")
 _REF_RE = re.compile(r"\[REF-(\d+)\]")
+_MARKET_CAP_TEXT_RE = re.compile(
+    r"market\s*cap(?:italization)?[^\d$€£]{0,40}([$€£]?\s*\d[\d,]*(?:\.\d+)?\s*(?:[TMBK]|trillion|billion|million|thousand)?)",
+    flags=re.IGNORECASE,
+)
+_CORE_FUNDAMENTAL_CLAIMS: frozenset[str] = frozenset({"eps", "revenue"})
+_WARNING_VARIANCE_THRESHOLD = 0.05
+_CRITICAL_VARIANCE_THRESHOLD = 0.10
 
 _TOOL_CAPABILITY_REQUIREMENTS: dict[str, tuple[tuple[str, str], ...]] = {
     "search_web": (("internet_dns_ok", "internet access"),),
@@ -104,6 +114,9 @@ GRAPH_STAGE_LABELS: dict[str, tuple[str, str]] = {
     "execute_tool_calls": ("Executing finance data tools", "Executed finance data tools"),
     "force_tool_retry": ("Forcing tool usage", "Forced tool usage"),
     "fallback_tool_execution": ("Auto-fetching market data", "Market data fetched"),
+    "verification_gate": ("Verifying and reconciling evidence", "Verification complete"),
+    "tiebreaker_tool_execution": ("Running tiebreaker data fetch", "Tiebreaker data fetched"),
+    "verification_disclaimer_response": ("Preparing disclaimed response", "Disclaimed response prepared"),
     "finalize_response": ("Synthesizing final response", "Synthesized final response"),
     "generation_node": ("Generating direct response", "Generated direct response"),
 }
@@ -405,6 +418,317 @@ def _enforce_numeric_verification(
             out_lines.append(warning)
 
     return "\n".join(out_lines)
+
+
+def _safe_json_dict(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw or "{}")
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_magnitude_number(raw: str) -> float | None:
+    text = (raw or "").strip().lower().replace("$", "").replace("€", "").replace("£", "")
+    if not text:
+        return None
+    mult = 1.0
+    if text.endswith("trillion"):
+        mult = 1_000_000_000_000.0
+        text = text.removesuffix("trillion").strip()
+    elif text.endswith("billion"):
+        mult = 1_000_000_000.0
+        text = text.removesuffix("billion").strip()
+    elif text.endswith("million"):
+        mult = 1_000_000.0
+        text = text.removesuffix("million").strip()
+    elif text.endswith("thousand"):
+        mult = 1_000.0
+        text = text.removesuffix("thousand").strip()
+    elif text.endswith("t"):
+        mult = 1_000_000_000_000.0
+        text = text[:-1].strip()
+    elif text.endswith("b"):
+        mult = 1_000_000_000.0
+        text = text[:-1].strip()
+    elif text.endswith("m"):
+        mult = 1_000_000.0
+        text = text[:-1].strip()
+    elif text.endswith("k"):
+        mult = 1_000.0
+        text = text[:-1].strip()
+
+    try:
+        return float(text.replace(",", "")) * mult
+    except ValueError:
+        return None
+
+
+def _source_quality_score(tool_name: str, payload: dict[str, Any]) -> float:
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
+    completeness = float(quality.get("completeness") or 0.0)
+    confidence = float(quality.get("confidence") or 0.0)
+    source = str(provenance.get("source") or "").lower()
+
+    trust = 0.5
+    if "fmp" in source:
+        trust = 1.0
+    elif "sec" in source:
+        trust = 0.95
+    elif tool_name == "search_web":
+        trust = 0.45
+
+    return round((0.55 * completeness) + (0.25 * confidence) + (0.20 * trust), 4)
+
+
+def _iter_dict_rows(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def _extract_claims_from_tool_result(tr: dict[str, Any]) -> list[dict[str, Any]]:
+    result_payload = _safe_json_dict(str(tr.get("result") or ""))
+    if not result_payload:
+        return []
+
+    tool_name = str(tr.get("tool") or "unknown_tool")
+    provenance = result_payload.get("provenance") if isinstance(result_payload.get("provenance"), dict) else {}
+    as_of = str(provenance.get("as_of") or "").strip() or str(provenance.get("retrieved_at") or "")[:10]
+    source = str(provenance.get("source") or tool_name)
+    score = _source_quality_score(tool_name, result_payload)
+    rows = _iter_dict_rows(result_payload.get("data"))
+
+    claims: list[dict[str, Any]] = []
+    key_map = {
+        "market_cap": "market_cap",
+        "marketcap": "market_cap",
+        "marketcapitalization": "market_cap",
+        "revenue": "revenue",
+        "total_revenue": "revenue",
+        "eps": "eps",
+        "eps_diluted": "eps",
+    }
+
+    for row in rows:
+        row_currency = str(row.get("currency") or provenance.get("currency") or "").upper()
+        for raw_key, mapped_key in key_map.items():
+            if raw_key not in row:
+                continue
+            value = row.get(raw_key)
+            if not isinstance(value, (int, float)):
+                continue
+            claims.append({
+                "claim_key": mapped_key,
+                "value": float(value),
+                "unit": "USD" if mapped_key in {"market_cap", "revenue"} else "",
+                "currency": row_currency,
+                "as_of": as_of,
+                "source": source,
+                "tool": tool_name,
+                "quality_score": score,
+                "is_numeric": True,
+            })
+
+        action = row.get("action") or row.get("signal") or row.get("recommendation")
+        if isinstance(action, str) and action.strip().upper() in {"BUY", "SELL", "HOLD"}:
+            claims.append({
+                "claim_key": "trade_action",
+                "value": action.strip().upper(),
+                "unit": "",
+                "currency": "",
+                "as_of": as_of,
+                "source": source,
+                "tool": tool_name,
+                "quality_score": score,
+                "is_numeric": False,
+            })
+
+        if "cagr" in row and isinstance(row.get("cagr"), (int, float)):
+            claims.append({
+                "claim_key": "cagr",
+                "value": float(row["cagr"]),
+                "unit": "ratio",
+                "currency": "",
+                "as_of": as_of,
+                "source": source,
+                "tool": tool_name,
+                "quality_score": score,
+                "is_numeric": True,
+                "derived": {
+                    "metric": "cagr",
+                    "formula_version": row.get("formula_version") or "cagr_v1",
+                    "raw_inputs": {
+                        "start_value": row.get("start_value"),
+                        "end_value": row.get("end_value"),
+                        "periods": row.get("periods"),
+                    },
+                },
+            })
+
+    if tool_name == "search_web":
+        serialized = json.dumps(result_payload)
+        for match in _MARKET_CAP_TEXT_RE.findall(serialized):
+            parsed_num = _parse_magnitude_number(match)
+            if parsed_num is None:
+                continue
+            claims.append({
+                "claim_key": "market_cap",
+                "value": parsed_num,
+                "unit": "USD",
+                "currency": "USD",
+                "as_of": as_of,
+                "source": source,
+                "tool": tool_name,
+                "quality_score": max(0.35, score),
+                "is_numeric": True,
+            })
+
+    return claims
+
+
+def _derive_verification_status(critical: list[dict[str, Any]], warnings: list[dict[str, Any]]) -> str:
+    if critical:
+        return "critical"
+    if warnings:
+        return "warning"
+    return "pass"
+
+
+def _build_verification_report(state: AgentState) -> dict[str, Any]:
+    claims: list[dict[str, Any]] = []
+    for tr in state.get("tool_results", []):
+        if isinstance(tr, dict):
+            claims.extend(_extract_claims_from_tool_result(tr))
+
+    warnings: list[dict[str, Any]] = []
+    critical: list[dict[str, Any]] = []
+    reconciled_claims: list[dict[str, Any]] = []
+    derived_calculations: list[dict[str, Any]] = []
+
+    claims_by_key: dict[str, list[dict[str, Any]]] = {}
+    for claim in claims:
+        claims_by_key.setdefault(claim["claim_key"], []).append(claim)
+
+    for claim_key, entries in claims_by_key.items():
+        if claim_key == "trade_action":
+            unique_actions = sorted({str(e.get("value") or "") for e in entries})
+            best = max(entries, key=lambda e: float(e.get("quality_score") or 0.0))
+            if len(unique_actions) > 1:
+                critical.append({
+                    "type": "contradictory_trade_signal",
+                    "claim_key": claim_key,
+                    "actions": unique_actions,
+                    "sources": sorted({str(e.get("source") or e.get("tool")) for e in entries}),
+                })
+            reconciled_claims.append({
+                "claim_key": claim_key,
+                "selected_value": best.get("value"),
+                "selected_source": best.get("source") or best.get("tool"),
+                "selection_mode": "best_quality",
+            })
+            continue
+
+        numeric_entries = [e for e in entries if bool(e.get("is_numeric"))]
+        if not numeric_entries:
+            continue
+
+        for entry in numeric_entries:
+            if not entry.get("as_of"):
+                warnings.append({
+                    "type": "missing_as_of",
+                    "claim_key": claim_key,
+                    "source": entry.get("source") or entry.get("tool"),
+                })
+            if claim_key in {"market_cap", "revenue", "eps"} and not (entry.get("currency") or entry.get("unit")):
+                warnings.append({
+                    "type": "missing_unit_or_currency",
+                    "claim_key": claim_key,
+                    "source": entry.get("source") or entry.get("tool"),
+                })
+
+        values = [float(e["value"]) for e in numeric_entries]
+        best = max(numeric_entries, key=lambda e: float(e.get("quality_score") or 0.0))
+        entry_summary: dict[str, Any] = {
+            "claim_key": claim_key,
+            "selected_value": best.get("value"),
+            "unit": best.get("unit") or "",
+            "currency": best.get("currency") or "",
+            "as_of": best.get("as_of") or "",
+            "selected_source": best.get("source") or best.get("tool"),
+            "selection_mode": "best_quality",
+        }
+
+        if len(values) > 1:
+            max_value = max(values)
+            min_value = min(values)
+            denominator = (abs(max_value) + abs(min_value)) / 2.0 or 1.0
+            variance_ratio = abs(max_value - min_value) / denominator
+            disagreement_range = {"min": min_value, "max": max_value, "variance_ratio": round(variance_ratio, 4)}
+            entry_summary["disagreement_range"] = disagreement_range
+
+            if claim_key in _CORE_FUNDAMENTAL_CLAIMS and variance_ratio > _CRITICAL_VARIANCE_THRESHOLD:
+                critical.append({
+                    "type": "core_fundamental_variance",
+                    "claim_key": claim_key,
+                    "variance_ratio": round(variance_ratio, 4),
+                    "threshold": _CRITICAL_VARIANCE_THRESHOLD,
+                    "range": disagreement_range,
+                })
+            elif variance_ratio > 0:
+                warnings.append({
+                    "type": "source_disagreement_range",
+                    "claim_key": claim_key,
+                    "variance_ratio": round(variance_ratio, 4),
+                    "threshold": _WARNING_VARIANCE_THRESHOLD,
+                    "range": disagreement_range,
+                })
+
+        if claim_key == "cagr":
+            for cagr_entry in numeric_entries:
+                derived = cagr_entry.get("derived") if isinstance(cagr_entry.get("derived"), dict) else {}
+                raw_inputs = derived.get("raw_inputs") if isinstance(derived.get("raw_inputs"), dict) else {}
+                formula_version = str(derived.get("formula_version") or "")
+                derived_calculations.append({
+                    "metric": "cagr",
+                    "value": cagr_entry.get("value"),
+                    "formula_version": formula_version or "cagr_v1",
+                    "raw_inputs": raw_inputs,
+                    "source": cagr_entry.get("source") or cagr_entry.get("tool"),
+                })
+                if not raw_inputs.get("start_value") or not raw_inputs.get("end_value") or not raw_inputs.get("periods"):
+                    warnings.append({
+                        "type": "derived_calc_missing_inputs",
+                        "claim_key": "cagr",
+                        "source": cagr_entry.get("source") or cagr_entry.get("tool"),
+                    })
+
+        reconciled_claims.append(entry_summary)
+
+    if not state.get("tool_results"):
+        critical.append({
+            "type": "mandatory_data_fetch_failure",
+            "detail": "No tool results were available for verification.",
+        })
+
+    status = _derive_verification_status(critical, warnings)
+    failure_reason = ""
+    if critical:
+        first = critical[0]
+        failure_reason = str(first.get("type") or "critical_verification_failure")
+
+    return {
+        "status": status,
+        "warnings": warnings,
+        "critical": critical,
+        "reconciled_claims": reconciled_claims,
+        "derived_calculations": derived_calculations,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "failure_reason": failure_reason,
+    }
 
 def _wrap_envelope(
     tool_name: str,
@@ -1146,6 +1470,166 @@ async def execute_tool_calls(state: AgentState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node: verification_gate
+# ---------------------------------------------------------------------------
+
+
+async def verification_gate(state: AgentState) -> dict:
+    """Verification & Reconciliation Gate.
+
+    Runs after tool results are gathered and before final synthesis. Produces a
+    structured ``verification_report`` artifact and severity classification.
+    """
+    report = _build_verification_report(state)
+    status = str(report.get("status") or "pass").lower()
+    failure_reason = str(report.get("failure_reason") or "")
+
+    logger.info(
+        "verification_gate: status=%s warnings=%d critical=%d",
+        status,
+        len(report.get("warnings") or []),
+        len(report.get("critical") or []),
+    )
+
+    return {
+        "verification_report": report,
+        "verification_status": status,
+        "verification_failure_reason": failure_reason,
+    }
+
+
+def _select_tiebreaker_tool(state: AgentState) -> tuple[str, dict[str, Any]]:
+    report = state.get("verification_report") if isinstance(state.get("verification_report"), dict) else {}
+    critical_items = report.get("critical") if isinstance(report.get("critical"), list) else []
+    warning_items = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    tickers = state.get("tickers_mentioned") or []
+    symbol = str(tickers[0]) if tickers else ""
+
+    critical_types = {str(item.get("type") or "") for item in critical_items if isinstance(item, dict)}
+    warning_types = {str(item.get("type") or "") for item in warning_items if isinstance(item, dict)}
+
+    if "contradictory_trade_signal" in critical_types and symbol:
+        return "get_technical_snapshot", {"symbol": symbol}
+    if "core_fundamental_variance" in critical_types and symbol:
+        return "get_financial_statements", {"symbol": symbol, "period": "annual", "limit": 4}
+    if (
+        "source_disagreement_range" in warning_types
+        or "missing_as_of" in warning_types
+        or "missing_unit_or_currency" in warning_types
+    ) and symbol:
+        return "get_company_profile", {"symbol": symbol}
+
+    query = str(state.get("current_query") or "").strip()
+    if query:
+        return "search_web", {"query": query, "max_results": 5}
+    if symbol:
+        return "get_company_profile", {"symbol": symbol}
+    return "search_web", {"query": "latest market fundamentals verification", "max_results": 5}
+
+
+async def tiebreaker_tool_execution(state: AgentState) -> dict:
+    """Run one targeted tool call to reconcile critical verification conflicts."""
+    mode_policy = _resolve_mode_policy(state)
+    count = int(state.get("tool_call_count") or 0)
+    attempts = int(state.get("tiebreaker_attempt_count") or 0)
+    elapsed = _elapsed_seconds_since_start(state)
+
+    if attempts >= 1:
+        return {
+            "tiebreaker_attempt_count": 1,
+            "verification_failure_reason": "tiebreaker_already_attempted",
+        }
+
+    if mode_policy.max_tool_calls is not None and count >= mode_policy.max_tool_calls:
+        return {
+            "tiebreaker_attempt_count": 1,
+            "verification_failure_reason": "tiebreaker_budget_exceeded",
+        }
+
+    if (
+        mode_policy.max_seconds is not None
+        and elapsed is not None
+        and elapsed >= mode_policy.max_seconds
+    ):
+        return {
+            "tiebreaker_attempt_count": 1,
+            "verification_failure_reason": "tiebreaker_time_budget_exceeded",
+        }
+
+    tool_name, args = _select_tiebreaker_tool(state)
+    handler = _TOOL_MAP.get(tool_name)
+    if handler is None:
+        return {
+            "tiebreaker_attempt_count": 1,
+            "verification_failure_reason": f"tiebreaker_tool_unavailable:{tool_name}",
+        }
+
+    logger.info("tiebreaker_tool_execution: invoking %s with args=%s", tool_name, args)
+    output = ""
+    try:
+        output = await handler.ainvoke(args)
+    except Exception as exc:
+        logger.warning("tiebreaker_tool_execution failed (%s): %s", tool_name, exc)
+        output = json.dumps({"success": False, "error": str(exc)})
+
+    tool_result = {
+        "tool": tool_name,
+        "args": args,
+        "result": output,
+    }
+    return {
+        "tool_results": [tool_result],
+        "citations": _extract_sources_from_result(output),
+        "tool_call_count": 1,
+        "tiebreaker_attempt_count": 1,
+        "verification_failure_reason": "",
+        "messages": [
+            SystemMessage(
+                content=(
+                    "VERIFICATION TIEBREAKER EXECUTED:\n"
+                    f"tool={tool_name} args={json.dumps(args, sort_keys=True, default=str)}"
+                )
+            )
+        ],
+    }
+
+
+async def verification_disclaimer_response(state: AgentState) -> dict:
+    """Return a disclaimed response when verification remains critically unresolved."""
+    report = state.get("verification_report") if isinstance(state.get("verification_report"), dict) else {}
+    reasons: list[str] = []
+    for item in report.get("critical") or []:
+        if not isinstance(item, dict):
+            continue
+        ctype = str(item.get("type") or "critical_verification_failure")
+        claim = str(item.get("claim_key") or "")
+        reasons.append(f"{ctype}{f' ({claim})' if claim else ''}")
+
+    reason_text = "; ".join(reasons[:3]) if reasons else "conflicting or incomplete evidence"
+    content = (
+        "I cannot provide a reliable final numeric conclusion because verification "
+        f"detected unresolved critical conflicts: {reason_text}. "
+        "Please retry with a narrower request, or ask me to cite a single authoritative source."
+    )
+    return {
+        "messages": [AIMessage(content=content)],
+        "verification_disclaimer_used": True,
+    }
+
+
+def _route_after_verification(state: AgentState) -> str:
+    status = str(state.get("verification_status") or "pass").lower()
+    attempts = int(state.get("tiebreaker_attempt_count") or 0)
+
+    if status == "critical":
+        if attempts < 1:
+            return "tiebreaker_tool_execution"
+        return "verification_disclaimer_response"
+
+    return "finalize_response"
+
+
+# ---------------------------------------------------------------------------
 # Node: finalize_response
 # ---------------------------------------------------------------------------
 
@@ -1235,7 +1719,10 @@ async def finalize_response(state: AgentState) -> dict:
     finally:
         db.close()
 
-    return {"messages": [AIMessage(content=full_response)]}
+    return {
+        "messages": [AIMessage(content=full_response)],
+        "verification_report": state.get("verification_report") or {},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1486,7 +1973,10 @@ def build_graph():
                            tool_calls AND count < 5?       │          │
                               Yes → execute_tool_calls ────┘          │
                               No, count==0 → force_tool_retry ────────┘ (loops back)
-                              No  → finalize_response → END           │
+                                        No  → verification_gate ─→ finalize_response → END
+                                                                └──────→ tiebreaker_tool_execution ─┐
+                                                                └──────→ verification_disclaimer_response → END
+                                                                                                                 └→ verification_gate
                                                                       │
                      No  → generation_node → END  ←───────────────────┘
     """
@@ -1501,6 +1991,9 @@ def build_graph():
     builder.add_node("execute_tool_calls", execute_tool_calls)
     builder.add_node("force_tool_retry", force_tool_retry)
     builder.add_node("fallback_tool_execution", fallback_tool_execution)
+    builder.add_node("verification_gate", verification_gate)
+    builder.add_node("tiebreaker_tool_execution", tiebreaker_tool_execution)
+    builder.add_node("verification_disclaimer_response", verification_disclaimer_response)
     builder.add_node("finalize_response", finalize_response)
 
     # -- Edges --
@@ -1524,13 +2017,25 @@ def build_graph():
             "execute_tool_calls": "execute_tool_calls",
             "force_tool_retry": "force_tool_retry",
             "fallback_tool_execution": "fallback_tool_execution",
+            "finalize_response": "verification_gate",
+        },
+    )
+
+    builder.add_conditional_edges(
+        "verification_gate",
+        _route_after_verification,
+        {
             "finalize_response": "finalize_response",
+            "tiebreaker_tool_execution": "tiebreaker_tool_execution",
+            "verification_disclaimer_response": "verification_disclaimer_response",
         },
     )
 
     builder.add_edge("execute_tool_calls", "route_finance_query")
     builder.add_edge("force_tool_retry", "route_finance_query")
-    builder.add_edge("fallback_tool_execution", "finalize_response")
+    builder.add_edge("fallback_tool_execution", "verification_gate")
+    builder.add_edge("tiebreaker_tool_execution", "verification_gate")
+    builder.add_edge("verification_disclaimer_response", END)
     builder.add_edge("finalize_response", END)
     builder.add_edge("generation_node", END)
 
