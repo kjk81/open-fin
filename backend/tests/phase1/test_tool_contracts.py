@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -10,9 +10,13 @@ from pydantic import ValidationError
 from schemas.tool_contracts import (
     SearchHit,
     SourceRef,
+    SourceRef,
     ToolResult,
     ToolTiming,
     WebSearchResult,
+    ToolResultEnvelope,
+    compute_completeness,
+    to_envelope,
 )
 
 
@@ -162,3 +166,55 @@ class TestToolResult:
         )
         assert "ToolResult" in repr(r)
         assert "fail" in repr(r)
+
+
+class TestToolResultEnvelopeAndCompleteness:
+    def _make_timing(self) -> ToolTiming:
+        t = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        return ToolTiming(tool_name="profile", started_at=t, ended_at=t)
+
+    def test_to_envelope_basic_fields_and_provenance(self):
+        fetched_at = datetime(2025, 6, 1, tzinfo=timezone.utc)
+        timing = self._make_timing()
+        result: ToolResult[dict] = ToolResult(
+            data={"name": "Apple Inc.", "sector": "Technology", "market_cap": 123.0, "description": "Desc"},
+            sources=[
+                SourceRef(
+                    url="https://example.com/aapl",
+                    title="FMP: AAPL",
+                    fetched_at=fetched_at,
+                )
+            ],
+            timing=timing,
+        )
+
+        envelope: ToolResultEnvelope = to_envelope(
+            result,
+            identifier="AAPL",
+            source_label=None,
+            as_of="2025-05-31",
+            warnings=["w1"],
+            completeness=0.75,
+        )
+
+        assert envelope.data["name"] == "Apple Inc."
+        assert envelope.provenance.identifier == "AAPL"
+        assert envelope.provenance.source == "fmp"
+        assert envelope.provenance.as_of == "2025-05-31"
+        assert envelope.provenance.retrieved_at == fetched_at.isoformat()
+        assert envelope.quality.completeness == 0.75
+        assert envelope.quality.warnings == ["w1"]
+        assert len(envelope.sources) == 1
+        assert str(envelope.sources[0].url) == "https://example.com/aapl"
+
+    def test_compute_completeness_for_company_profile(self):
+        data = {
+            "name": "Apple Inc.",
+            "sector": "Technology",
+            "market_cap": 123.0,
+            "description": None,
+        }
+        score, warnings = compute_completeness("get_company_profile", data)
+        # 3/4 required fields are non-null
+        assert score == 0.75
+        assert warnings and "Missing fields" in warnings[0]

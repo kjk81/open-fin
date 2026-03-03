@@ -124,12 +124,15 @@ def _redact_sensitive(value: Any, *, parent_key: str | None = None) -> Any:
 
 
 def _serialize_snapshot_row(row: Any) -> dict[str, Any]:
+    content = _loads_json(getattr(row, "content_json", None), default={})
+    citations = _loads_json(getattr(row, "citations_json", None), default=[])
+
     return {
         "id": row.id,
         "run_id": row.run_id,
         "category": row.category,
-        "content": _loads_json(getattr(row, "content_json", None), default={}),
-        "citations": _loads_json(getattr(row, "citations_json", None), default=[]),
+        "content": _redact_sensitive(content),
+        "citations": _redact_sensitive(citations),
         "tags": _loads_json(getattr(row, "tags_json", None), default=[]),
         "confidence": getattr(row, "confidence", None),
         "expires_at": row.expires_at.isoformat() if getattr(row, "expires_at", None) else None,

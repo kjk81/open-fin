@@ -31,13 +31,16 @@ class TestFmpClientGet:
         mock_response = MagicMock()
         mock_response.json.return_value = [{"symbol": "AAPL"}]
         client._http = AsyncMock()
+        # Capture positional args so we can inspect the composed URL; the
+        # client appends the apikey directly to the path, not via params.
         client._http.get = AsyncMock(return_value=mock_response)
 
         result = await client.get("/profile/AAPL")
 
-        # Verify apikey was injected
-        call_args = client._http.get.call_args
-        assert call_args[1].get("params", call_args[0][1] if len(call_args[0]) > 1 else {}).get("apikey") == "k123" or True
+        # Verify apikey was injected into the requested path
+        call_args, call_kwargs = client._http.get.call_args
+        requested_path = call_args[0] if call_args else call_kwargs.get("url", "")
+        assert "apikey=k123" in str(requested_path)
         assert result == [{"symbol": "AAPL"}]
 
     async def test_401_raises_unavailable(self):

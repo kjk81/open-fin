@@ -175,3 +175,213 @@ def test_run_export_returns_404_for_missing_run():
     res = client.get(f"/api/runs/{run_id}/export")
     assert res.status_code == 404
     assert res.json()["detail"] == "Run not found"
+
+
+def test_run_export_redacts_nested_list_secrets_and_handles_malformed_payloads():
+    client, session_factory = _build_client()
+    run_id = "22222222-2222-2222-2222-222222222222"
+
+    with session_factory() as db:
+        db.add(
+            AgentRun(
+                id=run_id,
+                session_id="sess-2",
+                mode="analysis",
+                status="success",
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+
+        # Well-formed payload with nested list secrets
+        payload_with_list = {
+            "credentials": [
+                {"api_key": "top-secret", "note": "should be redacted"},
+                {"token": "another-secret"},
+            ],
+            "safe_list": [1, 2, 3],
+        }
+        db.add(
+            AgentRunEvent(
+                run_id=run_id,
+                seq=1,
+                type="tool_end",
+                payload_json=json.dumps(payload_with_list),
+            )
+        )
+
+        # Malformed JSON payload should not break export
+        db.add(
+            AgentRunEvent(
+                run_id=run_id,
+                seq=2,
+                type="tool_end",
+                payload_json="not-json",
+            )
+        )
+        db.commit()
+
+    res = client.get(f"/api/runs/{run_id}/export")
+    assert res.status_code == 200
+    bundle = res.json()
+
+    assert len(bundle["event_timeline"]) == 2
+    first, second = bundle["event_timeline"]
+
+    # First event is parsed and redacted, including secrets in nested lists
+    creds = first["payload"]["credentials"]
+    assert creds[0]["api_key"] == "***REDACTED***"
+    assert creds[0]["note"] == "should be redacted"
+    assert creds[1]["token"] == "***REDACTED***"
+    assert first["payload"]["safe_list"] == [1, 2, 3]
+
+    # Second event had malformed JSON; payload should be None
+    assert second["payload"] is None
+
+
+def test_run_export_orders_events_by_seq_then_id_independent_of_insertion():
+    client, session_factory = _build_client()
+    run_id = "33333333-3333-3333-3333-333333333333"
+
+    with session_factory() as db:
+        db.add(
+            AgentRun(
+                id=run_id,
+                session_id="sess-3",
+                mode="analysis",
+                status="success",
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+
+        # Insert events out of sequence and with duplicate seq to exercise ordering
+        e1 = AgentRunEvent(
+            run_id=run_id,
+            seq=2,
+            type="tool_end",
+            payload_json=json.dumps({"step": "second"}),
+        )
+        db.add(e1)
+        db.commit()
+
+        e2 = AgentRunEvent(
+            run_id=run_id,
+            seq=1,
+            type="tool_end",
+            payload_json=json.dumps({"step": "first"}),
+        )
+        db.add(e2)
+        db.commit()
+
+        # Same seq, different ids: order should fall back to id asc
+        e3 = AgentRunEvent(
+            run_id=run_id,
+            seq=2,
+            type="tool_end",
+            payload_json=json.dumps({"step": "second-b"}),
+        )
+        db.add(e3)
+        db.commit()
+
+        first_id, second_id, third_id = e1.id, e2.id, e3.id
+        assert first_id != second_id != third_id
+
+    res = client.get(f"/api/runs/{run_id}/export")
+    assert res.status_code == 200
+    bundle = res.json()
+
+    steps = [evt["payload"]["step"] for evt in bundle["event_timeline"]]
+
+    # Ordered by seq asc, then id asc within the same seq
+    assert steps[0] == "first"  # seq=1
+    # For seq=2 events, the one with smaller id should come first
+    seq2_steps = [evt["payload"]["step"] for evt in bundle["event_timeline"] if evt["seq"] == 2]
+    assert seq2_steps == sorted(seq2_steps, key=lambda s: ["second", "second-b"].index(s))
+
+
+def test_run_bundle_replay_reconstructs_tool_sequence():
+    client, session_factory = _build_client()
+    run_id = "44444444-4444-4444-4444-444444444444"
+
+    with session_factory() as db:
+        db.add(
+            AgentRun(
+                id=run_id,
+                session_id="sess-4",
+                mode="analysis",
+                status="success",
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+
+        # Simulate a simple run with two tool calls (search_web then get_company_profile)
+        db.add_all(
+            [
+                AgentRunEvent(
+                    run_id=run_id,
+                    seq=1,
+                    type="tool_start",
+                    payload_json=json.dumps({"tool": "search_web", "step_id": "tool-search_web-1"}),
+                ),
+                AgentRunEvent(
+                    run_id=run_id,
+                    seq=2,
+                    type="tool_end",
+                    payload_json=json.dumps(
+                        {
+                            "tool": "search_web",
+                            "step_id": "tool-search_web-1",
+                            "success": True,
+                            "result_envelope": {"success": True},
+                        }
+                    ),
+                ),
+                AgentRunEvent(
+                    run_id=run_id,
+                    seq=3,
+                    type="tool_start",
+                    payload_json=json.dumps(
+                        {"tool": "get_company_profile", "step_id": "tool-get_company_profile-1"}
+                    ),
+                ),
+                AgentRunEvent(
+                    run_id=run_id,
+                    seq=4,
+                    type="tool_end",
+                    payload_json=json.dumps(
+                        {
+                            "tool": "get_company_profile",
+                            "step_id": "tool-get_company_profile-1",
+                            "success": False,
+                            "result_envelope": {"success": False, "error": "FMP unavailable"},
+                        }
+                    ),
+                ),
+            ]
+        )
+        db.commit()
+
+    res = client.get(f"/api/runs/{run_id}/export")
+    assert res.status_code == 200
+    bundle = res.json()
+
+    tool_events = [
+        evt
+        for evt in bundle["event_timeline"]
+        if evt["type"] in {"tool_start", "tool_end"} and isinstance(evt.get("payload"), dict)
+    ]
+    sequence = [
+        (evt["type"], evt["payload"]["tool"], evt["payload"].get("success"))
+        for evt in tool_events
+    ]
+
+    # Replay view of the run: ordered tool lifecycle derived purely from the bundle
+    assert sequence == [
+        ("tool_start", "search_web", None),
+        ("tool_end", "search_web", True),
+        ("tool_start", "get_company_profile", None),
+        ("tool_end", "get_company_profile", False),
+    ]

@@ -1,0 +1,139 @@
+# QA Prompts for Open-Fin Phased Plan
+
+This document contains a series of structured prompts for a coding agent to QA the implementation of the phased plan in the **Open-Fin** codebase. Each prompt is designed to be self-contained.
+
+---
+
+## Prompt 1: Phase 1 QA — Run Records & Citations
+**Role:** Expert QA Engineer & Full Stack Engineer
+**Task:** Verify the implementation of Phase 1 (Run Records, Normalized Artifacts, and Citations) in the Open-Fin codebase.
+
+### Core Directives
+- **Do NOT approach from previous developer angles.** Evaluate the system as if it were fresh and potentially flawed.
+- **Consider all root causes** (e.g., race conditions, concurrency) and **pre-emptively fix** them.
+- **Independent QA:** Conduct your own exploratory QA beyond this checklist; if you find a bug, you MUST fix it.
+- **Documentation:** Concisely update **AGENTS.md** only if you find inaccurate or stale information. Do NOT add info just for the sake of adding it.
+- **Silent Failures:** Do NOT ignore silent failures where tools return success but state is unchanged.
+
+### Verification Checklist
+1.  **Backend Persistence:**
+    *   Confirm the correct schema of [AgentRun](file:///c:/Users/kjk/antiod/web/open-fin/backend/models.py#207-218) and [AgentRunEvent](file:///c:/Users/kjk/antiod/web/open-fin/backend/models.py#220-238) tables in [backend/models.py](file:///c:/Users/kjk/antiod/web/open-fin/backend/models.py).
+    *   Verify [backend/agent/graph.py](file:///c:/Users/kjk/antiod/web/open-fin/backend/agent/graph.py) populates these for every query.
+    *   Ensure an append-only pattern for [AgentRunEvent](file:///c:/Users/kjk/antiod/web/open-fin/backend/models.py#220-238). **Do NOT** allow random-access updates to history.
+2.  **Artifact Normalization:**
+    *   Inspect [_build_artifact_registry](file:///c:/Users/kjk/antiod/web/open-fin/backend/agent/graph.py#324-376) and ensure deterministic `[REF-n]` IDs.
+    *   Confirm `ToolResultEnvelope` is used. **Do NOT** allow raw JSON results to reach synthesis.
+3.  **Citation Enforcement:**
+    *   Analyze [_enforce_numeric_verification](file:///c:/Users/kjk/antiod/web/open-fin/backend/agent/graph.py#402-439).
+    *   Ensure numbers are stripped unless they include a valid `[REF-n]`. **Do NOT** allow "common knowledge" bypasses.
+4.  **Test Suite Expansion:**
+    *   Expand `backend/tests/phase1`.
+    *   Add a test case where the model tries to "hallucinate" a number; verify the "Cannot Verify" disclaimer.
+
+---
+
+## Prompt 2: Phase 2 QA — Modes & Budgets
+**Role:** Expert QA Engineer & Full Stack Engineer
+**Task:** Verify the implementation of Phase 2 (Modes, Budgets, and Capability Snapshots) in the Open-Fin codebase.
+
+### Core Directives
+- **Do NOT approach from previous developer angles.** Evaluate the system as if it were fresh and potentially flawed.
+- **Consider all root causes** (e.g., race conditions, concurrency) and **pre-emptively fix** them.
+- **Independent QA:** Conduct your own exploratory QA beyond this checklist; if you find a bug, you MUST fix it.
+- **Documentation:** Concisely update **AGENTS.md** only if you find inaccurate or stale information. Do NOT add info just for the sake of adding it.
+- **Silent Failures:** Do NOT ignore silent failures where tools return success but state is unchanged.
+
+### Verification Checklist
+1.  **Mode Policies:**
+    *   Inspect `backend/agent/modes.py` for `quick`, `research`, `portfolio`, and `strategy`.
+    *   Verify `tool_allow_list`, `max_tool_calls`, and `max_seconds` are correctly defined.
+2.  **Budget Enforcement:**
+    *   Analyze `execute_tool_calls` and `_should_continue_tools`.
+    *   Verify execution stops immediately when budget is reached. **Do NOT** allow "one last tool call" if budget is zero.
+3.  **Capability Snapshots:**
+    *   Confirm `capabilities_snapshot` correctly detects env vars and worker reachability.
+    *   **Do NOT** assume a capability is present; verify the actual connection if possible.
+4.  **Test Suite Expansion:**
+    *   Expand `backend/tests/phase2`.
+    *   Add a test for `quick` mode ensuring it never attempts a web search.
+    *   Add a stress test for `max_seconds` budget; verify pre-emptive termination.
+
+---
+
+## Prompt 3: Phase 3 QA — Verification & Memory
+**Role:** Expert QA Engineer & Full Stack Engineer
+**Task:** Verify the implementation of Phase 3 (Verification Gates and Typed Memory) in the Open-Fin codebase.
+
+### Core Directives
+- **Do NOT approach from previous developer angles.** Evaluate the system as if it were fresh and potentially flawed.
+- **Consider all root causes** (e.g., race conditions, concurrency) and **pre-emptively fix** them.
+- **Independent QA:** Conduct your own exploratory QA beyond this checklist; if you find a bug, you MUST fix it.
+- **Documentation:** Concisely update **AGENTS.md** only if you find inaccurate or stale information. Do NOT add info just for the sake of adding it.
+- **Silent Failures:** Do NOT ignore silent failures where tools return success but state is unchanged.
+
+### Verification Checklist
+1.  **Verification Gate:**
+    *   Inspect `_build_verification_report` for unit/currency consistency and disagreement reconciliation.
+    *   **Do NOT** let conflicting figures pass without a `critical` warning.
+    *   Verify `tiebreaker_tool_execution`. **Do NOT** loop infinitely on tiebreaker failure.
+2.  **Typed Memory & Consent:**
+    *   Confirm schema for `UserPreferences`, `PortfolioSnapshot`, `EpisodicSummary`, and `ResearchLibrary` in `backend/models.py`.
+    *   Inspect `backend/agent/memory_consent.py`. **Do NOT** persist data without a confirmed proposal token.
+3.  **FAISS Indexing:**
+    *   Ensure only summaries are embedded. **Do NOT** index raw, multi-page results.
+4.  **Test Suite Expansion:**
+    *   Expand `backend/tests/phase3`.
+    *   Add a revenue conflict test; verify `critical` status.
+    *   Verify memory writes fail if no `confirmed` status is in the gate.
+
+---
+
+## Prompt 4: Phase 4 QA — Action Boundary & Safety
+**Role:** Expert QA Engineer & Full Stack Engineer
+**Task:** Verify the implementation of Phase 4 (Unified Action Boundary, Confirmations, and Transaction Logging) in the Open-Fin codebase.
+
+### Core Directives
+- **Do NOT approach from previous developer angles.** Evaluate the system as if it were fresh and potentially flawed.
+- **Consider all root causes** (e.g., race conditions, concurrency) and **pre-emptively fix** them.
+- **Independent QA:** Conduct your own exploratory QA beyond this checklist; if you find a bug, you MUST fix it.
+- **Documentation:** Concisely update **AGENTS.md** only if you find inaccurate or stale information. Do NOT add info just for the sake of adding it.
+- **Silent Failures:** Do NOT ignore silent failures where tools return success but state is unchanged.
+
+### Verification Checklist
+1.  **Action Registry:**
+    *   Inspect `backend/agent/action_registry.py`. **Do NOT** allow unauthorized write-categories for unregistered tools.
+2.  **Confirmation Gate:**
+    *   Analyze `confirmation_gate`.
+    *   Verify graph pauses before non-READ_ONLY tools. **Do NOT** bypass for "internal" writes unless documented.
+3.  **Transaction Logging:**
+    *   Check `_log_state_write`.
+    *   Confirm mutations create `state_write` events. **Do NOT** log if the tool call failed.
+4.  **Test Suite Expansion:**
+    *   Expand `backend/tests/phase4`.
+    *   Test "Write Block": Verify graph terminates without a token.
+    *   Ensure accurate `rollback_hint` generation.
+
+---
+
+## Prompt 5: Phase 5 QA — Evals & Observability
+**Role:** Expert QA Engineer & Full Stack Engineer
+**Task:** Verify the implementation of Phase 5 (Evaluation Harness, Observability, and Run Bundle Export) in the Open-Fin codebase.
+
+### Core Directives
+- **Do NOT approach from previous developer angles.** Evaluate the system as if it were fresh and potentially flawed.
+- **Consider all root causes** (e.g., race conditions, concurrency) and **pre-emptively fix** them.
+- **Independent QA:** Conduct your own exploratory QA beyond this checklist; if you find a bug, you MUST fix it.
+- **Documentation:** Concisely update **AGENTS.md** only if you find inaccurate or stale information. Do NOT add info just for the sake of adding it.
+- **Silent Failures:** Do NOT ignore silent failures where tools return success but state is unchanged.
+
+### Verification Checklist
+1.  **Run Bundle Export:**
+    *   Inspect `backend/routers/runs.py`. **Do NOT** export raw events without redacting sensitive keys (API keys, tokens).
+2.  **Observability:**
+    *   Check `GRAPH_STAGE_LABELS`. **Do NOT** emit generic labels; ensure alignment with node activity.
+3.  **Evaluation Harness:**
+    *   Analyze existing tests. **Do NOT** rely solely on happy-path tests. Ensure 401/429 tool errors are handled.
+4.  **Test Suite Expansion:**
+    *   Expand `backend/tests/phase5`.
+    *   Write a "Replay Test": Verifyexported bundle can reconstruct tool sequences.
+    *   Verify `AgentRunEvent` ordering. **Do NOT** assume sequential IDs imply sequential execution.

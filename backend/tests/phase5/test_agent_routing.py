@@ -231,6 +231,31 @@ class TestFinalizeVerifyGateHelpers:
         assert report["status"] == "critical"
         assert any(item.get("type") == "core_fundamental_variance" for item in report["critical"])
 
+    def test_verification_report_flags_unverifiable_tool_output_as_critical(self) -> None:
+        """Non-empty tool_results that yield no structured claims must not silently pass."""
+        from agent.graph import _build_verification_report
+
+        # result payload is invalid JSON, so _safe_json_dict returns {},
+        # producing zero claims even though tools apparently ran.
+        state = {
+            "tool_results": [
+                {
+                    "tool": "get_company_profile",
+                    "result": "this is not json",
+                },
+                {
+                    "tool": "search_web",
+                    "result": "null",
+                },
+            ]
+        }
+
+        report = _build_verification_report(state)
+        assert report["status"] == "critical"
+        # New critical type documents the failure mode explicitly.
+        types = {item.get("type") for item in report["critical"]}
+        assert "unverifiable_tool_output" in types
+
 
 class TestVerificationRoute:
     def test_routes_to_tiebreaker_on_first_critical(self) -> None:
@@ -258,7 +283,8 @@ class TestVerificationRoute:
             "verification_status": "warning",
             "tiebreaker_attempt_count": 0,
         }
-        assert _route_after_verification(state) == "finalize_response"
+        # Warning status should proceed to the memory_consent_gate before finalization.
+        assert _route_after_verification(state) == "memory_consent_gate"
 
 
 # ---------------------------------------------------------------------------

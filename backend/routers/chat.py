@@ -76,9 +76,10 @@ def _persist_event(run_id: str, seq: int, event_type: str, payload: dict) -> Non
             created_at=datetime.now(timezone.utc),
         ))
         db.commit()
-    except Exception:
+    except Exception as exc:
         db.rollback()
-        logger.debug("Failed to persist run event seq=%d for run %s", seq, run_id)
+        # Escalate to warning so silent loss of observability is easier to detect.
+        logger.warning("Failed to persist run event seq=%d for run %s: %s", seq, run_id, exc)
     finally:
         db.close()
 
@@ -92,9 +93,10 @@ def _complete_run(run_id: str, status: str) -> None:
             run.status = status
             run.completed_at = datetime.now(timezone.utc)
             db.commit()
-    except Exception:
+    except Exception as exc:
         db.rollback()
-        logger.debug("Failed to complete run %s", run_id)
+        # Escalate to warning so incomplete runs are visible in logs.
+        logger.warning("Failed to complete run %s: %s", run_id, exc)
     finally:
         db.close()
 

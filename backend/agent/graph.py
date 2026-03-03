@@ -731,6 +731,25 @@ def _build_verification_report(state: AgentState) -> dict[str, Any]:
             "type": "mandatory_data_fetch_failure",
             "detail": "No tool results were available for verification.",
         })
+    elif not claims:
+        # Tools ran but produced no verifiable claims — treat as a critical
+        # verification failure so downstream nodes and the UI cannot mistake
+        # this for a clean pass.
+        tool_names: list[str] = []
+        for tr in state.get("tool_results") or []:
+            if not isinstance(tr, dict):
+                continue
+            name = str(tr.get("tool") or "").strip()
+            if name:
+                tool_names.append(name)
+        critical.append({
+            "type": "unverifiable_tool_output",
+            "detail": (
+                "Tool outputs could not be parsed into structured claims for verification. "
+                "This is usually caused by schema mismatches or non-JSON envelopes."
+            ),
+            "tools": sorted(set(tool_names)),
+        })
 
     status = _derive_verification_status(critical, warnings)
     failure_reason = ""
@@ -1546,9 +1565,19 @@ async def execute_tool_calls(state: AgentState) -> dict:
         tool_results.append({"tool": name, "args": args, "result": output})
         citations.extend(_extract_sources_from_result(output))
         executed_count += 1
+        # --- Transaction logging for confirmed successful writes ---
+        # Only log when the tool call did not explicitly fail. This prevents
+        # ``state_write`` events from being recorded for failed operations.
+        is_successful = True
+        try:
+            parsed_output = json.loads(str(output or "{}"))
+        except Exception:
+            parsed_output = {}
+        if isinstance(parsed_output, dict):
+            if parsed_output.get("success") is False or parsed_output.get("error"):
+                is_successful = False
 
-        # --- Transaction logging for confirmed writes ---
-        if category != ActionCategory.READ_ONLY:
+        if category != ActionCategory.READ_ONLY and is_successful:
             # Find the confirmation token that authorised this action
             confirmation_token = next(
                 (t for t in confirmed_set if t == preview.action_id), preview.action_id

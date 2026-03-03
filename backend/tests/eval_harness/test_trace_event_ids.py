@@ -6,6 +6,7 @@ import uuid
 import pytest
 from langchain_core.messages import HumanMessage
 
+from agent.graph import describe_graph_stage
 from database import Base
 from models import AgentRun, AgentRunEvent
 from routers.chat import ChatRequest, _persist_event, _stream_graph
@@ -82,6 +83,25 @@ async def test_stream_events_emit_trace_with_node_and_tool_ids(monkeypatch):
         chunks.append(chunk)
 
     assert chunks
+
+    # Parse SSE payloads to validate stage status labels for route_finance_query
+    status_events = []
+    for chunk in chunks:
+        for line in chunk.splitlines():
+            if not line.startswith("data: "):
+                continue
+            payload = json.loads(line[len("data: ") :])
+            if payload.get("type") == "status":
+                status_events.append(payload)
+
+    stage_events = [e for e in status_events if e.get("phase") == "route_finance_query"]
+    assert any(evt.get("state") == "running" for evt in stage_events)
+    assert any(evt.get("state") == "done" for evt in stage_events)
+
+    start_label = describe_graph_stage("route_finance_query", "start")
+    end_label = describe_graph_stage("route_finance_query", "end")
+    assert any(evt.get("message") == start_label for evt in stage_events)
+    assert any(evt.get("message") == end_label for evt in stage_events)
     by_type = {event_type: payload for event_type, payload in captured}
 
     chain_start = by_type["chain_start"]
@@ -133,3 +153,13 @@ def test_persisted_event_payload_contains_trace_object(monkeypatch):
         assert parsed["trace"]["tool_call_id"] == "call-db-1"
     finally:
         db.close()
+
+
+def test_describe_graph_stage_handles_unknown_node():
+    # Known node returns start/end labels
+    assert describe_graph_stage("verification_gate", "start") is not None
+    assert describe_graph_stage("verification_gate", "end") is not None
+
+    # Unknown node returns None (no generic label leakage)
+    assert describe_graph_stage("unknown_node_xyz", "start") is None
+    assert describe_graph_stage("unknown_node_xyz", "end") is None
