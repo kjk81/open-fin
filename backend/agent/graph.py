@@ -117,6 +117,7 @@ GRAPH_STAGE_LABELS: dict[str, tuple[str, str]] = {
     "verification_gate": ("Verifying and reconciling evidence", "Verification complete"),
     "tiebreaker_tool_execution": ("Running tiebreaker data fetch", "Tiebreaker data fetched"),
     "verification_disclaimer_response": ("Preparing disclaimed response", "Disclaimed response prepared"),
+    "memory_consent_gate": ("Checking memory consent", "Memory consent checked"),
     "finalize_response": ("Synthesizing final response", "Synthesized final response"),
     "generation_node": ("Generating direct response", "Generated direct response"),
 }
@@ -126,6 +127,23 @@ _FINANCE_INTENTS: frozenset[str] = frozenset({
     "ticker_deep_dive",
     "stock_screening",
     "sec_filings",
+})
+
+_PERSISTENCE_INTENT_TOOLS: frozenset[str] = frozenset({
+    "get_company_profile",
+    "get_peers",
+    "get_financial_statements",
+    "get_balance_sheet",
+    "get_technical_snapshot",
+    "get_filings_metadata",
+    "extract_filing_sections",
+    "read_filings",
+    "search_web",
+    "fetch_webpage",
+    "get_social_sentiment",
+    "screen_stocks",
+    "get_ohlcv",
+    "get_institutional_holders",
 })
 
 # System prompts are now generated dynamically by agent/prompts.py.
@@ -1022,6 +1040,20 @@ async def get_social_sentiment(ticker: str) -> str:
 
 
 @langchain_tool
+def confirm_memory_write(proposal_id: str, decision: str = "confirm") -> str:
+    """Confirm or discard a pending long-term memory persistence proposal.
+
+    Args:
+        proposal_id: UUID proposal identifier emitted in a consent_required event.
+        decision: "confirm" to persist, "discard" to cancel.
+    """
+    from .memory_consent import confirm_persistence_proposal
+
+    result = confirm_persistence_proposal(proposal_id=proposal_id, decision=decision)
+    return json.dumps(result)
+
+
+@langchain_tool
 def load_skill(skill_name: str) -> str:
     """Load a reusable analytical skill (playbook) by name.
 
@@ -1066,6 +1098,7 @@ FINANCE_TOOLS: list = [
     search_web,
     fetch_webpage,
     get_social_sentiment,
+    confirm_memory_write,
     load_skill,
 ]
 
@@ -1626,7 +1659,64 @@ def _route_after_verification(state: AgentState) -> str:
             return "tiebreaker_tool_execution"
         return "verification_disclaimer_response"
 
-    return "finalize_response"
+    return "memory_consent_gate"
+
+
+def _extract_confirmation_decision(state: AgentState) -> str:
+    for tr in reversed(state.get("tool_results") or []):
+        if not isinstance(tr, dict) or tr.get("tool") != "confirm_memory_write":
+            continue
+        try:
+            payload = json.loads(str(tr.get("result") or "{}"))
+        except Exception:
+            continue
+        status = str(payload.get("status") or "").strip().lower()
+        if status in {"confirmed", "discarded"}:
+            return status
+    return ""
+
+
+def _has_persistence_intent(state: AgentState) -> bool:
+    for tr in state.get("tool_results") or []:
+        if not isinstance(tr, dict):
+            continue
+        tool_name = str(tr.get("tool") or "").strip()
+        if tool_name in _PERSISTENCE_INTENT_TOOLS:
+            return True
+    return False
+
+
+async def memory_consent_gate(state: AgentState) -> dict:
+    """Set consent-gate state before finalization when persistence is intended."""
+    decision = _extract_confirmation_decision(state)
+    if decision == "confirmed":
+        return {
+            "pending_memory_write": False,
+            "memory_consent_status": "confirmed",
+            "memory_write_proposal": {},
+        }
+    if decision == "discarded":
+        return {
+            "pending_memory_write": False,
+            "memory_consent_status": "discarded",
+            "memory_write_proposal": {},
+        }
+
+    if _has_persistence_intent(state):
+        return {
+            "pending_memory_write": True,
+            "memory_consent_status": "pending",
+            "memory_write_proposal": {
+                "scopes": ["kg", "faiss", "portfolio", "preferences", "research_library"],
+                "action": "Call confirm_memory_write(proposal_id, decision='confirm'|'discard')",
+            },
+        }
+
+    return {
+        "pending_memory_write": False,
+        "memory_consent_status": "none",
+        "memory_write_proposal": {},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1992,6 +2082,7 @@ def build_graph():
     builder.add_node("force_tool_retry", force_tool_retry)
     builder.add_node("fallback_tool_execution", fallback_tool_execution)
     builder.add_node("verification_gate", verification_gate)
+    builder.add_node("memory_consent_gate", memory_consent_gate)
     builder.add_node("tiebreaker_tool_execution", tiebreaker_tool_execution)
     builder.add_node("verification_disclaimer_response", verification_disclaimer_response)
     builder.add_node("finalize_response", finalize_response)
@@ -2025,7 +2116,7 @@ def build_graph():
         "verification_gate",
         _route_after_verification,
         {
-            "finalize_response": "finalize_response",
+            "memory_consent_gate": "memory_consent_gate",
             "tiebreaker_tool_execution": "tiebreaker_tool_execution",
             "verification_disclaimer_response": "verification_disclaimer_response",
         },
@@ -2035,6 +2126,7 @@ def build_graph():
     builder.add_edge("force_tool_retry", "route_finance_query")
     builder.add_edge("fallback_tool_execution", "verification_gate")
     builder.add_edge("tiebreaker_tool_execution", "verification_gate")
+    builder.add_edge("memory_consent_gate", "finalize_response")
     builder.add_edge("verification_disclaimer_response", END)
     builder.add_edge("finalize_response", END)
     builder.add_edge("generation_node", END)

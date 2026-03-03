@@ -154,7 +154,7 @@ async def lifespan(app: FastAPI):
     write_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
     kg_module.set_write_queue(write_queue)
 
-    upsert_count = 0
+    upserted_id_count = 0
 
     async def faiss_writer_loop() -> None:
         """Drain the write queue and apply FAISS updates serially.
@@ -170,7 +170,7 @@ async def lifespan(app: FastAPI):
         When FAISS is not ready, dequeued messages are silently dropped with
         a warning, keeping the API responsive in degraded mode.
         """
-        nonlocal upsert_count
+        nonlocal upserted_id_count
         while True:
             try:
                 msg = await write_queue.get()
@@ -192,14 +192,14 @@ async def lifespan(app: FastAPI):
 
                 if op == "upsert" and node_ids:
                     faiss_mgr.upsert_vectors(node_ids, texts)
-                    upsert_count += 1
+                    upserted_id_count += len(node_ids)
                     logger.debug(
-                        "FAISS upsert completed: %d vectors (total upserts: %d).",
+                        "FAISS upsert completed: %d vectors (total upserted ids: %d).",
                         len(node_ids),
-                        upsert_count,
+                        upserted_id_count,
                     )
 
-                    if upsert_count % 50 == 0:
+                    if upserted_id_count >= 50:
                         def _check_rebuild() -> None:
                             _db = SessionLocal()
                             try:
@@ -216,6 +216,7 @@ async def lifespan(app: FastAPI):
                                 _db.close()
 
                         await asyncio.to_thread(_check_rebuild)
+                        upserted_id_count = 0
 
                 elif op == "rebuild":
                     logger.info("FAISS rebuild requested via queue.")

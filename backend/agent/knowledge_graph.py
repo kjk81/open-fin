@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import AsyncSessionLocal, SessionLocal
 from models import KGEdge, KGNode
 from schemas.kg_entities import Company, FilingMetadata, MetricObservation, WebDocument
+from .embedding_policy import build_embedding_text
 
 logger = logging.getLogger(__name__)
 
@@ -215,14 +216,49 @@ async def _aupsert_edge(
 
 def _embedding_text_for(node_type: str, name: str, metadata: dict | None = None) -> str:
     """Build a plain-text representation suitable for FAISS embedding."""
-    if _faiss_mgr is not None:
-        return _faiss_mgr.text_for_node(node_type, name, metadata or {})
-    # Fallback: concatenate name and metadata values
-    parts = [name]
-    for v in (metadata or {}).values():
-        if isinstance(v, str) and v:
-            parts.append(v)
-    return " ".join(parts)
+    return build_embedding_text(node_type, name, metadata or {}) or ""
+
+
+async def _afetch_embedding_payload(
+    session: AsyncSession,
+    node_ids: list[int],
+) -> tuple[list[int], list[str]]:
+    """Resolve canonical embedding payload for node IDs in input order."""
+    if not node_ids:
+        return [], []
+
+    unique_ids: list[int] = []
+    seen: set[int] = set()
+    for node_id in node_ids:
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        unique_ids.append(node_id)
+
+    result = await session.execute(
+        select(KGNode).where(KGNode.id.in_(unique_ids), KGNode.is_deleted == False)
+    )
+    rows = result.scalars().all()
+    by_id = {row.id: row for row in rows}
+
+    eligible_ids: list[int] = []
+    eligible_texts: list[str] = []
+
+    for node_id in unique_ids:
+        row = by_id.get(node_id)
+        if row is None:
+            continue
+        try:
+            metadata = json.loads(row.metadata_json or "{}")
+        except Exception:
+            metadata = {}
+        text = build_embedding_text(row.node_type, row.name, metadata)
+        if not text:
+            continue
+        eligible_ids.append(node_id)
+        eligible_texts.append(text)
+
+    return eligible_ids, eligible_texts
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +855,7 @@ def _parse_date(raw: Any) -> date:
 async def upsert_from_tool_results(
     tool_results: list[dict],
     extra_sources: list[dict] | None = None,
+    consent_granted: bool = True,
 ) -> dict[str, Any]:
     """Persist entities extracted from LangGraph tool results into the KG.
 
@@ -842,6 +879,15 @@ async def upsert_from_tool_results(
         len(tool_results),
         len(extra_sources or []),
     )
+    if not consent_granted:
+        logger.info("KG persistence skipped: consent gate not granted.")
+        return {
+            "nodes_created": 0,
+            "edges_created": 0,
+            "node_ids": [],
+            "requires_consent": True,
+        }
+
     total_nodes = 0
     total_edges = 0
     all_new_ids: list[int] = []
@@ -915,6 +961,7 @@ async def upsert_from_tool_results(
 
         try:
             await session.commit()
+            all_new_ids, all_new_texts = await _afetch_embedding_payload(session, all_new_ids)
             logger.info(
                 "KG post-processing committed: %d nodes, %d edges.",
                 total_nodes,
@@ -926,7 +973,7 @@ async def upsert_from_tool_results(
             return {"nodes_created": 0, "edges_created": 0, "node_ids": []}
 
     # Enqueue FAISS vector updates (non-blocking)
-    if all_new_ids:
+    if all_new_ids and all_new_texts:
         if _write_queue is None:
             logger.warning(
                 "FAISS write queue not initialized — %d node(s) will not be indexed: %s",
@@ -1062,15 +1109,23 @@ def upsert_ticker_snapshot(
 
     # --- Enqueue FAISS vector update (non-blocking) ---
     if new_node_ids:
+        filtered_ids: list[int] = []
+        filtered_texts: list[str] = []
+        for node_id, text in zip(new_node_ids, new_node_texts):
+            if text:
+                filtered_ids.append(node_id)
+                filtered_texts.append(text)
+
         if _write_queue is None:
             logger.warning(
                 "FAISS write queue not initialized — ticker %s (%d node(s)) will not be indexed.",
                 symbol,
-                len(new_node_ids),
+                len(filtered_ids),
             )
         else:
             try:
-                _write_queue.put_nowait(("upsert", new_node_ids, new_node_texts))
+                if filtered_ids:
+                    _write_queue.put_nowait(("upsert", filtered_ids, filtered_texts))
             except asyncio.QueueFull:
                 logger.warning(
                     "FAISS write queue full — vectors for %s stale until rebuild.",

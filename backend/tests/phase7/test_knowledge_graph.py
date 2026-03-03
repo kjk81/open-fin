@@ -829,3 +829,68 @@ class TestUpsertFromToolResultsDispatch:
         # No processor → nodes_created may be 0; must not raise
         assert isinstance(summary, dict)
         assert "nodes_created" in summary
+
+    async def test_filters_transient_metric_nodes_from_faiss_payload(self, patch_async_db):
+        """Metric-heavy outputs should not enqueue transient vectors by default."""
+        import json as _json
+        import asyncio
+
+        set_faiss_manager(None)
+        write_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        set_write_queue(write_queue)
+
+        tool_results = [
+            {
+                "tool": "get_financial_statements",
+                "args": {"ticker": "AAPL"},
+                "result": _json.dumps({
+                    "success": True,
+                    "data": {
+                        "symbol": "AAPL",
+                        "period": "2025-01-01",
+                        "revenue": 123456789,
+                        "net_income": 9876543,
+                        "eps": 3.21,
+                    },
+                    "sources": [],
+                }),
+            }
+        ]
+
+        summary = await upsert_from_tool_results(tool_results)
+        assert summary["nodes_created"] >= 1
+        # No eligible high-value embeddings for raw metric observations.
+        assert summary["node_ids"] == []
+        assert write_queue.empty()
+
+    async def test_consent_gate_false_skips_persistence(self, patch_async_db):
+        """When consent is not granted, upsert_from_tool_results must no-op."""
+        import json as _json
+        import asyncio
+
+        set_faiss_manager(None)
+        write_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        set_write_queue(write_queue)
+
+        tool_results = [
+            {
+                "tool": "get_company_profile",
+                "args": {"ticker": "NVDA"},
+                "result": _json.dumps({
+                    "success": True,
+                    "data": {
+                        "symbol": "NVDA",
+                        "name": "NVIDIA Corporation",
+                        "sector": "Technology",
+                        "industry": "Semiconductors",
+                    },
+                    "sources": [],
+                }),
+            }
+        ]
+
+        summary = await upsert_from_tool_results(tool_results, consent_granted=False)
+        assert summary.get("requires_consent") is True
+        assert summary["nodes_created"] == 0
+        assert summary["edges_created"] == 0
+        assert write_queue.empty()

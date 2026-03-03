@@ -17,6 +17,11 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from agent.graph import describe_graph_stage, graph
 from agent.knowledge_graph import upsert_from_tool_results
+from agent.memory_consent import (
+    consume_confirmed_proposal,
+    has_persistence_payload,
+    register_persistence_proposal,
+)
 from agent.modes import resolve_requested_mode
 from database import SessionLocal
 from models import AgentRun, AgentRunEvent, ChatHistory
@@ -227,6 +232,9 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
         "verification_failure_reason": "",
         "tiebreaker_attempt_count": 0,
         "verification_disclaimer_used": False,
+        "pending_memory_write": False,
+        "memory_consent_status": "none",
+        "memory_write_proposal": {},
     }
 
     # Accumulators filled during streaming
@@ -415,6 +423,19 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
                                     "report": verification_report,
                                 })
 
+                        if bool(chain_output.get("pending_memory_write")):
+                            proposal = chain_output.get("memory_write_proposal") or {}
+                            if isinstance(proposal, dict):
+                                yield emit({
+                                    "type": "status",
+                                    "state": "warning",
+                                    "phase": name,
+                                    "message": "Long-term memory write requires explicit confirmation",
+                                    "verbose": True,
+                                    "run_id": run_id,
+                                    "details": proposal,
+                                })
+
                     stage_message = describe_graph_stage(name, "end")
                     if stage_message:
                         residual = extract_visible_content(flush=True)
@@ -595,18 +616,71 @@ async def _stream_graph(request: ChatRequest) -> AsyncGenerator[str, None]:
 
         kg_result: dict = {"nodes_created": 0, "edges_created": 0, "node_ids": []}
         kg_error: str | None = None
-        tool_names_collected = [r.get("tool") for r in accumulated_tool_results if isinstance(r, dict)]
+        persistable_tool_results = [
+            r for r in accumulated_tool_results
+            if isinstance(r, dict) and str(r.get("tool") or "") != "confirm_memory_write"
+        ]
+        tool_names_collected = [r.get("tool") for r in persistable_tool_results if isinstance(r, dict)]
         logger.info(
             "KG post-processing: %d accumulated tool result(s) to process: %s",
-            len(accumulated_tool_results),
+            len(persistable_tool_results),
             tool_names_collected or "(none)",
         )
-        if accumulated_tool_results:
+
+        confirmed = consume_confirmed_proposal(request.session_id)
+        if confirmed:
+            yield emit({
+                "type": "status",
+                "state": "running",
+                "phase": "post_process",
+                "message": "Consent confirmed, persisting approved memory artifacts",
+                "verbose": True,
+            })
             try:
                 kg_result = await asyncio.wait_for(
                     upsert_from_tool_results(
-                        accumulated_tool_results,
+                        confirmed.get("tool_results") or [],
+                        extra_sources=confirmed.get("extra_sources") or [],
+                        consent_granted=True,
+                    ),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error("KG post-processing (confirmed proposal) timed out after 30s")
+                kg_error = "Knowledge graph update timed out"
+            except Exception as exc:
+                logger.error("KG post-processing error (confirmed proposal): %s", exc, exc_info=True)
+                kg_error = str(exc)
+
+        if has_persistence_payload(persistable_tool_results, accumulated_sources):
+            proposal = register_persistence_proposal(
+                session_id=request.session_id,
+                run_id=run_id,
+                tool_results=persistable_tool_results,
+                extra_sources=accumulated_sources,
+                reason="kg_faiss_post_process",
+            )
+            yield emit({
+                "type": "consent_required",
+                "run_id": run_id,
+                "proposal": proposal,
+            })
+            yield emit({
+                "type": "status",
+                "state": "warning",
+                "phase": "post_process",
+                "message": "Memory persistence queued. Confirm with confirm_memory_write to commit.",
+                "verbose": True,
+                "details": proposal,
+            })
+
+        elif persistable_tool_results and not confirmed:
+            try:
+                kg_result = await asyncio.wait_for(
+                    upsert_from_tool_results(
+                        persistable_tool_results,
                         extra_sources=accumulated_sources,
+                        consent_granted=False,
                     ),
                     timeout=30.0,
                 )

@@ -24,7 +24,7 @@ async def faiss_writer_loop(
 ) -> int:
     """Execute the writer loop until shutdown sentinel.
 
-    Returns the number of upsert operations processed.
+    Returns the number of upserted IDs processed.
 
     Parameters
     ----------
@@ -32,7 +32,7 @@ async def faiss_writer_loop(
         Simulate FAISS readiness gate; when False, dequeued messages are
         dropped with a warning (degraded mode).
     """
-    upsert_count = 0
+    upserted_id_count = 0
 
     while True:
         try:
@@ -48,9 +48,9 @@ async def faiss_writer_loop(
 
             if op == "upsert" and node_ids:
                 faiss_mgr.upsert_vectors(node_ids, texts)
-                upsert_count += 1
+                upserted_id_count += len(node_ids)
 
-                if upsert_count % 50 == 0:
+                if upserted_id_count >= 50:
                     _db = session_factory()
                     try:
                         faiss_mgr.maybe_rebuild(
@@ -60,6 +60,7 @@ async def faiss_writer_loop(
                         )
                     finally:
                         _db.close()
+                    upserted_id_count = 0
 
             elif op == "rebuild":
                 _db = session_factory()
@@ -73,7 +74,7 @@ async def faiss_writer_loop(
         except Exception:
             pass  # log and continue in production
 
-    return upsert_count
+    return upserted_id_count
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +109,7 @@ class TestFaissWriterLoop:
 
         count = await faiss_writer_loop(queue, mgr, session_factory)
         mgr.upsert_vectors.assert_called_once_with([1, 2], ["text1", "text2"])
-        assert count == 1
+        assert count == 2
 
     async def test_rebuild_message(self, queue, mgr, session_factory):
         """A rebuild message calls faiss_mgr._rebuild_from_db."""
@@ -139,23 +140,33 @@ class TestFaissWriterLoop:
         assert mgr.upsert_vectors.call_count == 2
 
     async def test_periodic_rebuild_at_50_upserts(self, queue, mgr, session_factory):
-        """After 50 upserts, maybe_rebuild is called."""
+        """After 50 upserted IDs, maybe_rebuild is called."""
         for i in range(50):
             await queue.put(("upsert", [i], [f"text_{i}"]))
         await queue.put((None, None, None))
 
         count = await faiss_writer_loop(queue, mgr, session_factory)
-        assert count == 50
+        assert count == 0
         mgr.maybe_rebuild.assert_called_once()
 
     async def test_no_rebuild_before_50(self, queue, mgr, session_factory):
-        """Before 50 upserts, maybe_rebuild is NOT called."""
+        """Before 50 upserted IDs, maybe_rebuild is NOT called."""
         for i in range(49):
             await queue.put(("upsert", [i], [f"text_{i}"]))
         await queue.put((None, None, None))
 
-        await faiss_writer_loop(queue, mgr, session_factory)
+        count = await faiss_writer_loop(queue, mgr, session_factory)
+        assert count == 49
         mgr.maybe_rebuild.assert_not_called()
+
+    async def test_rebuild_triggers_from_batch_size(self, queue, mgr, session_factory):
+        """A single batch with >=50 IDs triggers maybe_rebuild once."""
+        await queue.put(("upsert", list(range(60)), [f"text_{i}" for i in range(60)]))
+        await queue.put((None, None, None))
+
+        count = await faiss_writer_loop(queue, mgr, session_factory)
+        assert count == 0
+        mgr.maybe_rebuild.assert_called_once()
 
     async def test_multiple_upserts_sequential(self, queue, mgr, session_factory):
         """Multiple upsert messages are processed in order."""

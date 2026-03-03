@@ -46,6 +46,7 @@ import faiss
 import numpy as np
 from fastembed import TextEmbedding
 from filelock import FileLock
+from .embedding_policy import build_embedding_text
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -258,22 +259,7 @@ class FaissManager:
         metadata:
             Optional dict parsed from ``KGNode.metadata_json``.
         """
-        metadata = metadata or {}
-        if node_type == "ticker":
-            parts = [
-                name,
-                metadata.get("company_name", ""),
-                metadata.get("sector", ""),
-                metadata.get("industry", ""),
-            ]
-            return " ".join(p for p in parts if p).strip()
-        if node_type == "sector":
-            label = name.removeprefix("sector:")
-            return f"Sector: {label}"
-        if node_type == "industry":
-            label = name.removeprefix("industry:")
-            return f"Industry: {label}"
-        return name
+        return build_embedding_text(node_type, name, metadata or {}) or name
 
     # ------------------------------------------------------------------
     # Index lifecycle
@@ -365,11 +351,27 @@ class FaissManager:
             logger.info("FAISS index initialised (empty).")
             return
 
-        ids = np.array([r.id for r in rows], dtype=np.int64)
-        texts = [
-            self.text_for_node(r.node_type, r.name, json.loads(r.metadata_json or "{}"))
-            for r in rows
-        ]
+        filtered_pairs: list[tuple[int, str]] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row.metadata_json or "{}")
+            except Exception:
+                metadata = {}
+            text = build_embedding_text(row.node_type, row.name, metadata)
+            if not text:
+                continue
+            filtered_pairs.append((row.id, text))
+
+        if not filtered_pairs:
+            inner = faiss.IndexFlatL2(_EMBED_DIM)
+            self._index = faiss.IndexIDMap(inner)
+            self._write_index_locked()
+            _write_meta(0)
+            logger.info("FAISS index rebuilt with 0 eligible vectors (policy filtered).")
+            return
+
+        ids = np.array([node_id for node_id, _ in filtered_pairs], dtype=np.int64)
+        texts = [text for _, text in filtered_pairs]
 
         # Embed in batches to bound memory
         vec_parts: list[np.ndarray] = []

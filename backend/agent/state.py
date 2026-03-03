@@ -121,3 +121,12 @@ class AgentState(TypedDict):
 
     # True when graph falls back to a disclaimed response after failed tiebreak.
     verification_disclaimer_used: bool
+
+    # True when persistence should pause for explicit user confirmation.
+    pending_memory_write: bool
+
+    # Consent gate status: "none" | "pending" | "confirmed" | "discarded".
+    memory_consent_status: str
+
+    # Structured proposal metadata emitted by memory_consent_gate.
+    memory_write_proposal: dict[str, Any]

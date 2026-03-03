@@ -366,9 +366,9 @@ class TestIndexTypeThreshold:
 # ---------------------------------------------------------------------------
 
 class TestTextForNode:
-    def test_ticker(self):
+    def test_company(self):
         text = FaissManager.text_for_node(
-            "ticker", "AAPL", {"company_name": "Apple", "sector": "Tech"}
+            "company", "AAPL", {"company_name": "Apple", "sector": "Tech", "description": "Consumer electronics"}
         )
         assert "AAPL" in text
         assert "Apple" in text
@@ -403,7 +403,7 @@ class TestRebuildBatching:
                 id=i,
                 node_type="company",
                 name=f"SYM{i}",
-                metadata_json="{}",
+                metadata_json=json.dumps({"description": f"Summary for SYM{i}"}),
                 is_deleted=False,
             ))
         db_session.commit()
@@ -411,6 +411,23 @@ class TestRebuildBatching:
         manager._rebuild_from_db(db_session)
         assert manager._index is not None
         assert manager._index.ntotal == n
+
+    def test_rebuild_filters_non_eligible_nodes(self, manager, db_session):
+        """Metric-only nodes are excluded by the canonical embedding policy."""
+        from models import KGNode as KGN
+
+        db_session.add(KGN(
+            id=1,
+            node_type="metric",
+            name="metric:revenue:AAPL:2025-01-01",
+            metadata_json=json.dumps({"value": 100}),
+            is_deleted=False,
+        ))
+        db_session.commit()
+
+        manager._rebuild_from_db(db_session)
+        assert manager._index is not None
+        assert manager._index.ntotal == 0
 
 
 # ---------------------------------------------------------------------------

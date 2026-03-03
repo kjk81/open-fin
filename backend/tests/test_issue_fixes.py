@@ -817,3 +817,124 @@ class TestContextRefsValidation:
         }
         result = await intent_router(state)
         assert "TSLA" in result["tickers_mentioned"]
+
+
+class TestConsentGateFlow:
+    """Consent gate regressions for chat post-processing persistence."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_mocks(self):
+        from agent.memory_consent import _reset_for_tests
+
+        _reset_for_tests()
+        self.graph_mock = MagicMock()
+        self.upsert_mock = AsyncMock(return_value={
+            "nodes_created": 1,
+            "edges_created": 1,
+            "node_ids": [1],
+        })
+        self.session_mock = MagicMock()
+
+        self._patches = [
+            patch("routers.chat.graph", self.graph_mock),
+            patch("routers.chat.upsert_from_tool_results", self.upsert_mock),
+            patch("routers.chat.SessionLocal", MagicMock(return_value=self.session_mock)),
+        ]
+        for p in self._patches:
+            p.start()
+        yield
+        for p in self._patches:
+            p.stop()
+        _reset_for_tests()
+
+    def _app(self) -> FastAPI:
+        app = FastAPI()
+        app.include_router(chat_router, prefix="/api")
+        return app
+
+    async def _post_chat(self, app, payload: dict) -> tuple[int, str]:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/chat", json=payload, timeout=30)
+            return resp.status_code, resp.text
+
+    async def test_emits_consent_required_and_skips_immediate_upsert(self):
+        async def _events(*_args, **_kwargs):
+            yield {
+                "event": "on_tool_end",
+                "name": "get_company_profile",
+                "data": {
+                    "input": {"symbol": "AAPL"},
+                    "output": json.dumps({
+                        "success": True,
+                        "data": {
+                            "symbol": "AAPL",
+                            "name": "Apple Inc.",
+                            "sector": "Technology",
+                            "industry": "Consumer Electronics",
+                        },
+                        "sources": [],
+                    }),
+                },
+            }
+
+        self.graph_mock.astream_events = _events
+        app = self._app()
+
+        status, body = await self._post_chat(app, {
+            "message": "Analyze AAPL",
+            "session_id": _valid_session_id(),
+        })
+        assert status == 200
+
+        events = _parse_sse(body)
+        consent_events = [e for e in events if e.get("type") == "consent_required"]
+        assert len(consent_events) == 1
+        assert "proposal_id" in consent_events[0]["proposal"]
+
+        # No immediate persistence without explicit confirmation.
+        self.upsert_mock.assert_not_called()
+
+    async def test_confirmed_proposal_commits_pending_payload(self):
+        from agent.memory_consent import register_persistence_proposal, confirm_persistence_proposal
+
+        session_id = _valid_session_id()
+        proposal = register_persistence_proposal(
+            session_id=session_id,
+            run_id=str(uuid.uuid4()),
+            tool_results=[{
+                "tool": "get_company_profile",
+                "args": {"symbol": "MSFT"},
+                "result": json.dumps({
+                    "success": True,
+                    "data": {
+                        "symbol": "MSFT",
+                        "name": "Microsoft",
+                        "sector": "Technology",
+                        "industry": "Software",
+                    },
+                    "sources": [],
+                }),
+            }],
+            extra_sources=[],
+        )
+        confirm = confirm_persistence_proposal(proposal["proposal_id"], "confirm")
+        assert confirm["success"] is True
+
+        async def _events(*_args, **_kwargs):
+            if False:
+                yield {}
+
+        self.graph_mock.astream_events = _events
+        app = self._app()
+
+        status, body = await self._post_chat(app, {
+            "message": "confirm pending memory write",
+            "session_id": session_id,
+        })
+        assert status == 200
+        events = _parse_sse(body)
+        assert any(e.get("type") == "kg_update" for e in events)
+
+        self.upsert_mock.assert_called_once()
+        assert self.upsert_mock.call_args.kwargs.get("consent_granted") is True
